@@ -1,92 +1,267 @@
-# CS211 Winter 2024 Project 3
-## Expectations 
-### Context
-In IoT applications, edge devices are typically constrained in computational capability and limited system support (programming and libraries). Thus running AI models with heavy computation is a challenging task on edge devices. AI accelerators, such as Coral TPU from Google, have been designed to address this issue.
-### Problem Statement
-In this project, we are going to develop machine learning apps to be applied on edge systems using the Coral TPU accelerator. Despite its Tops-level throughput, it only supports a subset of TensorFlow Lite operations with 8-bit fixed-point precision. Effort is required to produce functional applications with the accelerator. (Details: https://coral.ai/docs/edgetpu/models-intro)
-### Goal
-The goal of the project is to export a common machine learning application to the edge device with the Coral TPU accelerator and address the challenges in the pipeline, including machine learning model, quantization and accuracy.
-### Tasks
-1. For a given model (in Tensorflow), convert the TFLite model to be used with the Coral TPU accelerator. (High priority)
-2. In the above process, certain manipulations on the model may be necessary. Create automated tools to perform the operations programmatically. (Medium priority)
-3. Evaluate the accuracy of the converted (quantized) model. And use quantize-aware training or transfer learning to optimize the model. (High priority) Expected outcome: Optimized models for the edge AI using Coral TPU and a set of helper programs for model conversion and/or optimization.
-4. Desired skills
+# CS211 Project: Accuracy-Aware Model Partitioning for Coral Edge TPU
 
-   (a) Tensorflow, Tensorflow Lite
-   
-   (b) Python programming
+This repository keeps the original script-first layout from the previous team, but removes the most brittle hardcoded paths so we can build a cleaner Student A baseline around it.
 
-Mentor: Boyan Ding <dboyan@cs.ucla.edu>
+The current baseline now covers:
 
-## References & Resources
-### Python setup
-[Link to tflite documentation](https://coral.ai/docs/edgetpu/tflite-python/) (a system with python 3.9 is needed, you can use conda to create a python 3.9 environment)
+- **Task A**: DeepLabCut animal pose estimation
+- **Task B**: SSD MobileNet V2 object detection on COCO val2017
+- **Task C**: DeepLab V3 semantic segmentation on Pascal VOC 2012 val
 
-### Model compiler
-[Link to Coral AI Compiler](https://coral.ai/docs/edgetpu/compiler/)
+The split / TPU-prep path is only verified end to end for Task A right now. Tasks B and C are currently set up through the float32 baseline and metric-evaluation stage.
 
-### DLC codebase
-[Link to DLC Codebase](DLC)
+The model download/export step stays **outside** this repo. For DLC, that workflow lives in [model_export](/Users/jef/Desktop/219-project/model_export).
 
-### Model 
-[Link to Model](https://huggingface.co/spaces/DeepLabCut/MegaDetector_DeepLabCut/blob/fcceb7af93d1271633a7d0025a21498cf19863d0/DLC_ma_superquadruped_resnet_50_iteration-0_shuffle-1.tar.gz)
+## Current Layout
 
-### Visualization script
-[Link to Visualization script](import_pb.py)
-import_pb.py in this repository 
-Use the .pb file in the model as input and the model can be visualized with tensorboard as described in the comments (available after installing tensorflow)
+### Top-level scripts
 
-### Tensorflow Model Basics Documentation
-[Link to Documentation](<Tensorflow Model Basics.pdf>)
+- [tensorflow_run.py](/Users/jef/Desktop/219-project/cs211-winter2024/tensorflow_run.py): float32 full-graph baseline runner
+- [run_baseline.py](/Users/jef/Desktop/219-project/cs211-winter2024/run_baseline.py): float32 baseline runner; saves prediction baselines for all tasks and accuracy metrics where enabled
+- [gen_tflite.py](/Users/jef/Desktop/219-project/cs211-winter2024/gen_tflite.py): exports the TPU prefix as a SavedModel for an arbitrary boundary
+- [convert.py](/Users/jef/Desktop/219-project/cs211-winter2024/convert.py): converts the SavedModel prefix to TFLite
+- [split.py](/Users/jef/Desktop/219-project/cs211-winter2024/split.py): exports split artifacts and metadata for a chosen boundary
+- [updated_edgetpu_test.py](/Users/jef/Desktop/219-project/cs211-winter2024/updated_edgetpu_test.py): reusable `HybridRunner` validation path; currently used in CPU-only partitioned mode
+- [auto_partition.py](/Users/jef/Desktop/219-project/cs211-winter2024/auto_partition.py): generic graph candidate enumerator plus TPU-compatibility/BFS scaffold for Student B to extend
+- [import_pb.py](/Users/jef/Desktop/219-project/cs211-winter2024/import_pb.py): graph visualization helper for TensorBoard
 
-### TPU Starter
-[Link to TPU Starter](tpu-starter.tar.gz) 
+### Minimal shared helpers
 
-### Tf.graph documentation 
-[Link to tf.graph documentation](https://www.tensorflow.org/api_docs/python/tf/Graph#get_operations)
+These scripts share a small helper layer under [src](/Users/jef/Desktop/219-project/cs211-winter2024/src):
 
-## Steps to Model 
-1. run the gen_tflite.py script. This file is based on the gen_lite_model.py in the tpu-starter. This will create a new directory /DLC_ma_sub_p1_320_320 which will contain the model that needs to be trained.
-   a. Ensure this file is in the same directory level as the snapshot-1000.pb file
-```bash
-python gen_tflite.py
+- `config_utils.py`: load concise JSON task configs
+- `graph_utils.py`: load/import frozen graphs, extract prefix/suffix graph defs
+- `data_loaders.py`: AP-10K pose images, DLC video frames, COCO val images, and Pascal VOC val image+label loading
+- `evaluation.py`: labeled accuracy metrics for tasks that enable them in config
+- `io_utils.py`: save `.npz` outputs and JSON summaries
+
+### Configs
+
+- [configs/task_a_dlc.json](/Users/jef/Desktop/219-project/cs211-winter2024/configs/task_a_dlc.json): current working Task A config
+- [configs/task_b_detection.json](/Users/jef/Desktop/219-project/cs211-winter2024/configs/task_b_detection.json): current working Task B config
+- [configs/task_c_segmentation.json](/Users/jef/Desktop/219-project/cs211-winter2024/configs/task_c_segmentation.json): current working Task C config
+
+## Data And Model Layout
+
+The repo now expects task-local artifacts under:
+
+```text
+data/
+  task_a/
+    models/
+      snapshot-700000.pb
+    data/
+      ap-10k/
+        annotations/
+        data/
+  task_b/
+    models/
+      frozen_inference_graph.pb
+      ssd_mobilenet_v2_coco_quant_postprocess_edgetpu.tflite
+    data/
+      val2017/
+      annotations/
+  task_c/
+    models/
+      frozen_inference_graph.pb
+      deeplabv3_mnv2_pascal_quant_edgetpu.tflite
+    data/
+      pascal-voc-2012-DatasetNinja/
+        val/
+          img/
+          ann/
+artifacts/
+  task_a/
+    dlc/
+  task_b/
+    detection/
+  task_c/
+    segmentation/
 ```
-2. run the train.py script. This file is based on the dlc_convert.py in the tpu-starter. This will train the compressed model and convert it to a tflite model. This will generate a file named output.tflite which will be compiled into a file that's compatible with the Edge TPU.
-   a. Ensure this file is in the same directory level as the /DLC_ma_sub_p1_320_320 directory
-```bash
-python convert.py
-```
-## Steps to Compile 
-1. Compile the tflite model using the following documentation: [Link to Coral AI Compiler](https://coral.ai/docs/edgetpu/compiler/)
-```bash
-edgetpu_compiler output.tflite
-```
-2. Run import_pb.py by running this command: 
-```bash
-python import_pb.py --graph=<pb-filename>.pb  --log_dir=./tb_logs
-```
-In this instance, we use snapshot-700000.pb
-```bash
-python import_pb.py --graph=snapshot-700000.pb  --log_dir=./tb_logs
-```
-3. Get the graph on localhost 
-```bash
-tensorboard --logdir=tb_logs --port=6006 --host=localhost
-```
-## Steps to Split Graph
-Refer to [documentation](#tensorflow-model-basics-documentation)
-1. Double click on the "Import" box 
-2. Loading model is in 
 
-## Run Model on TPU
-Follow these steps to get started with the Edge TPU: [Link to Coral Edge TPU Instructions](https://coral.ai/docs/accelerator/get-started/#requirements)
-1. Get output of model on TPU 
-2. Use the output of that model as an input on the model that is not on the TPU
-3. Run updated_edgetpu_test.py to do this 
+For Task A, the current working config points at:
 
-## Items to do 
-1. [Model](#steps-to-model) 
-2. [Compile into TPU format](#steps-to-compile) 
-3. [Split graph](#steps-to-split-graph)
-4. [Run Model on TPU](#run-model-on-tpu)
-5. [Model from TPU to non-TPU](#model-from-tpu-to-non-tpu)
+- model: `data/task_a/models/snapshot-700000.pb`
+- AP-10K images: `data/task_a/data/ap-10k/data`
+- AP-10K annotations: `data/task_a/data/ap-10k/annotations/ap10k-val-split1.json`
+
+These inputs are intentionally treated as local runtime assets, not as tracked source files.
+
+For Task C, only the `val/` split is kept locally in the current repo layout because that is the subset Student A needs for baseline and evaluation work.
+
+## Environment
+
+For the baseline repo itself, you only need TensorFlow + NumPy + OpenCV. A minimal dependency list is in [requirements.txt](/Users/jef/Desktop/219-project/cs211-winter2024/requirements.txt).
+
+For now, the easiest working environment is the same local conda env already used by the DLC export workflow:
+
+```bash
+cd /Users/jef/Desktop/219-project/cs211-winter2024
+./run_in_env.sh python <script>.py ...
+```
+
+That keeps DeepLabCut and model export concerns outside this repo while still giving the baseline scripts a known-good TensorFlow environment.
+
+## Task A Split Workflow
+
+### 1. Float32 baseline
+
+Run the full frozen graph entirely on CPU:
+
+```bash
+cd /Users/jef/Desktop/219-project/cs211-winter2024
+./run_in_env.sh python tensorflow_run.py --config configs/task_a_dlc.json --frame-limit 2
+```
+
+This writes:
+
+- `artifacts/task_a/dlc/full_graph_outputs.npz`
+- `artifacts/task_a/dlc/full_graph_summary.json`
+
+Important: this is the canonical Student A baseline. It is **not** represented as a fake `0-100` partition. It is simply the full float32 graph run on CPU.
+
+### 2. Enumerate candidate partition points
+
+```bash
+./run_in_env.sh python auto_partition.py --config configs/task_a_dlc.json
+```
+
+This writes:
+
+- `artifacts/task_a/dlc/partition_candidates.json`
+
+This first pass is intentionally generic. It does not pick a “best” split and it no longer depends on DLC-specific regex rules in the config. Instead it:
+
+- lists candidate tensors from graph ops
+- reports a simple “potentially TPU-compatible” op count
+- preserves a BFS-style backward-closure helper as starting scaffolding for Student B
+
+### 3. Export the prefix subgraph
+
+```bash
+./run_in_env.sh python gen_tflite.py --config configs/task_a_dlc.json --force
+```
+
+This writes:
+
+- `artifacts/task_a/dlc/prefix_saved_model/`
+- `artifacts/task_a/dlc/prefix_saved_model_metadata.json`
+
+### 4. Convert the prefix to TFLite
+
+```bash
+./run_in_env.sh python convert.py \
+  --config configs/task_a_dlc.json \
+  --model artifacts/task_a/dlc/prefix_saved_model \
+  --output artifacts/task_a/dlc/output.tflite
+```
+
+This gives the TFLite prefix artifact that later TPU compilation will consume.
+
+### 5. Export generalized split metadata
+
+```bash
+./run_in_env.sh python split.py --config configs/task_a_dlc.json --force
+```
+
+This writes:
+
+- `artifacts/task_a/dlc/prefix_saved_model/`
+- `artifacts/task_a/dlc/suffix_graph.pb`
+- `artifacts/task_a/dlc/split_metadata.json`
+
+### 6. Validate the split in CPU-only mode
+
+```bash
+./run_in_env.sh python updated_edgetpu_test.py --config configs/task_a_dlc.json --frame-limit 2
+```
+
+This writes:
+
+- `artifacts/task_a/dlc/partitioned_cpu_outputs.npz`
+- `artifacts/task_a/dlc/boundary_outputs.npz`
+- `artifacts/task_a/dlc/partitioned_cpu_summary.json`
+
+The current working DLC split reproduces the full float32 outputs exactly in CPU-only validation.
+
+## Float32 Baselines
+
+Use [run_baseline.py](/Users/jef/Desktop/219-project/cs211-winter2024/run_baseline.py) when you want a clean float32 baseline record saved. It always writes raw predictions and inference summaries; it only computes labeled accuracy metrics when the task config enables `compute_accuracy`.
+
+Examples:
+
+```bash
+./run_in_env.sh python run_baseline.py --config configs/task_a_dlc.json --frame-limit 100
+./run_in_env.sh python run_baseline.py --config configs/task_b_detection.json --frame-limit 100
+./run_in_env.sh python run_baseline.py --config configs/task_c_segmentation.json --frame-limit 100
+```
+
+This writes, per task:
+
+- `full_graph_outputs.npz`
+- `full_graph_summary.json`
+- `baseline_results.json`
+
+### Task A notes
+
+- Task A now uses AP-10K validation images as an unlabeled input set for the fidelity baseline.
+- The current DLC model predicts 39 landmarks, while AP-10K labels 17 landmarks.
+- Because Student A is using Task A for relative-degradation experiments, the official baseline skips labeled accuracy and simply stores float32 predictions for later split-vs-baseline comparisons.
+
+### Task B / Task C notes
+
+Run the float32 baselines with:
+
+```bash
+./run_in_env.sh python tensorflow_run.py --config configs/task_b_detection.json --frame-limit 2
+./run_in_env.sh python tensorflow_run.py --config configs/task_c_segmentation.json --frame-limit 2
+```
+
+These write:
+
+- `artifacts/task_b/detection/full_graph_outputs.npz`
+- `artifacts/task_b/detection/full_graph_summary.json`
+- `artifacts/task_c/segmentation/full_graph_outputs.npz`
+- `artifacts/task_c/segmentation/full_graph_summary.json`
+- `artifacts/task_b/detection/baseline_results.json`
+- `artifacts/task_c/segmentation/baseline_results.json`
+
+Notes:
+
+- Tasks B and C keep both kinds of baseline artifacts:
+  - raw float32 predictions for future drift comparisons
+  - labeled accuracy metrics for the original float32 models
+- Task B outputs stack cleanly into dense arrays such as detection boxes, scores, classes, and `num_detections`.
+- Task C outputs keep native image sizes, so the saved `SemanticPredictions` array is stored as an object array when sample shapes differ.
+
+## Edge TPU Sanity Checks
+
+The downloaded precompiled `.tflite` files for Tasks B and C are real Edge TPU binaries. Without TPU hardware they cannot be executed in the standard CPU TFLite interpreter; local allocation fails with `edgetpu-custom-op`, which is expected.
+
+That means the current no-hardware sanity check is:
+
+- verify the files exist in the expected paths
+- verify TensorFlow can run the frozen `.pb` baselines
+- verify the Edge TPU `.tflite` files are recognized as Edge TPU builds by their unresolved `edgetpu-custom-op`
+
+## Graph Visualization
+
+`import_pb.py` still works as the original TensorBoard helper. Example:
+
+```bash
+./run_in_env.sh python import_pb.py \
+  --graph=data/task_a/models/snapshot-700000.pb \
+  --log_dir=./tb_logs
+
+../model_export/.conda-export/bin/tensorboard --logdir=tb_logs --port=6006 --host=localhost
+```
+
+## Current Scope
+
+This first pass still intentionally stops short of:
+
+- TPU hardware execution
+- heuristic partition ranking
+- boundary proxy metric computation
+
+Those pieces build on top of the current baseline rather than replacing it.

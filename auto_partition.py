@@ -1,157 +1,204 @@
+from __future__ import annotations
+
+import argparse
 from collections import deque
-import tensorflow as tf
+
+from src.config_utils import load_config
+from src.graph_utils import import_graph, load_graph_def
+from src.io_utils import save_json
 
 
-def is_blue_node(node):
-    """
-      Determines if the given node can be run on the TPU or not (i.e. if the node is blue or not)
+POTENTIALLY_TPU_COMPATIBLE_OP_TYPES = {
+    "Add",
+    "AddV2",
+    "AvgPool",
+    "BiasAdd",
+    "ConcatV2",
+    "Conv2D",
+    "DepthwiseConv2dNative",
+    "ExpandDims",
+    "FusedBatchNorm",
+    "FusedBatchNormV3",
+    "Identity",
+    "MatMul",
+    "MaxPool",
+    "Mean",
+    "Mul",
+    "Pack",
+    "Pad",
+    "Relu",
+    "Relu6",
+    "Reshape",
+    "ResizeBilinear",
+    "Rsqrt",
+    "Shape",
+    "Sigmoid",
+    "Softmax",
+    "Squeeze",
+    "StridedSlice",
+    "Sub",
+    "Sum",
+    "Tanh",
+    "Transpose",
+}
 
-      Args:
-          node: A node in the tensorflow graph
-
-      Returns:
-          True if the node is compatible with TPU, False otherwise.
-      """
-
-    supported_ops = {"Add", "AveragePool2d", "Concatenation", "Conv2d", "DepthwiseConv2d", "ExpandDims",
-                     "FullyConnected", "L2Normalization",
-                     "Logistic", "LSTM", "Maximum", "MaxPool2d", "Mean", "Minimum", "Mul", "Pack", "Pad", "PReLU",
-                     "Quantize", "ReduceMax",
-                     "ReduceMin", "ReLU", "ReLU6", "ReLUN1To1", "Reshape", "ResizeBilinear", "ResizeNearestNeighbor",
-                     "Rsqrt", "Slice",
-                     "Softmax", "SpaceToDepth", "Split", "Squeeze", "StridedSlice", "Sub", "Sum", "Squared-difference",
-                     "Tanh", "Transpose", "TransposeConv"}
-
-    op_name = node.name
-    for sup_op in supported_ops:
-        # Check for compatibility with TPU
-        if sup_op in op_name:
-            return True
-
-    return False
-
-
-def find_all_blue_nodes(graph):
-    # list of supported operations by TPU
-    supported_ops = {"Add", "AveragePool2d", "Concatenation", "Conv2d", "DepthwiseConv2d", "ExpandDims",
-                     "FullyConnected", "L2Normalization",
-                     "Logistic", "LSTM", "Maximum", "MaxPool2d", "Mean", "Minimum", "Mul", "Pack", "Pad", "PReLU",
-                     "Quantize", "ReduceMax",
-                     "ReduceMin", "ReLU", "ReLU6", "ReLUN1To1", "Reshape", "ResizeBilinear", "ResizeNearestNeighbor",
-                     "Rsqrt", "Slice",
-                     "Softmax", "SpaceToDepth", "Split", "Squeeze", "StridedSlice", "Sub", "Sum", "Squared-difference",
-                     "Tanh", "Transpose", "TransposeConv"}
-    blue_nodes = list()
-
-    # get all operations
-    ops = graph.get_operations()
+SKIP_CANDIDATE_OP_TYPES = {
+    "Assert",
+    "Assign",
+    "Const",
+    "NoOp",
+    "Placeholder",
+}
 
 
-    # iterate through all operations in the graph
-    for op in ops:
-        op_name = op.name
-        for sup_op in supported_ops:
-            # Check for compatibility with TPU
-            if sup_op in op_name:
-                blue_nodes.append(op)
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Enumerate graph partition candidates and report basic TPU-compatibility scaffolding. "
+            "This script intentionally does not choose a best split."
+        )
+    )
+    parser.add_argument(
+        "--config",
+        default="configs/task_a_dlc.json",
+        help="Path to the task config JSON.",
+    )
+    parser.add_argument(
+        "--compatible-only",
+        action="store_true",
+        help="Only emit candidate tensors from potentially TPU-compatible ops.",
+    )
+    parser.add_argument(
+        "--max-candidates",
+        type=int,
+        default=None,
+        help="Optional limit on the number of emitted candidates.",
+    )
+    return parser.parse_args()
 
-    return blue_nodes
+
+def is_potentially_tpu_compatible_op(op) -> bool:
+    return op.type in POTENTIALLY_TPU_COMPATIBLE_OP_TYPES
 
 
+def find_all_potentially_tpu_compatible_ops(graph):
+    return [op for op in graph.get_operations() if is_potentially_tpu_compatible_op(op)]
 
-# to do: cache the result from call to is_blue_node for speed up
-# to do: try to minimze the edges of the cut (the edges between the two subgraphs)
-def find_max_blue_subgraph(graph):
-    """
-    Finds the partition of a directed acyclic graph (DAG) that maximizes the size of the subgraph containing only blue nodes.
 
-    Args:
-      graph: A dictionary representing the graph. Keys are nodes, and values are sets of neighbor nodes.
+def find_max_tpu_compatible_backward_closure(graph) -> dict:
+    compatible_ops = find_all_potentially_tpu_compatible_ops(graph)
+    if not compatible_ops:
+        return {
+            "size": 0,
+            "seed_op": None,
+            "op_names": [],
+        }
 
-    Returns:
-      A tuple containing two sets: the first set represents the nodes in the subgraph with only blue nodes, and the second set represents the remaining nodes.
-    """
-    # Find blue nodes with no incoming edges (potential roots for BFS)
-    blue_roots = find_all_blue_nodes(graph)
+    best_seed = None
+    best_visited: set[str] = set()
 
-    max_size = 0
-    optimal_partition = None
+    for seed in compatible_ops:
+        visited: set[str] = set()
+        queue = deque([seed])
 
-    for last_node in blue_roots:
-        # first node of the graph since we know for sure that the first node is blue
-        # initialize necessary variables for BFS
-        visited = set()
-        queue = deque([last_node])
-
-        # conduct a modified BFS starting from the last_node
         while queue:
-            node = queue.popleft()
-            visited.add(node.name)
+            op = queue.popleft()
+            if op.name in visited:
+                continue
+            if not is_potentially_tpu_compatible_op(op):
+                continue
 
-            # checking if all the neighbours are blue for the current node
-            for neighbor in node.inputs:
-                if neighbor.name not in visited and is_blue_node(node) == True:
-                    queue.append(graph.get_operation_by_name(neighbor.name.split(":")[0]))
+            visited.add(op.name)
+            for input_tensor in op.inputs:
+                producer = input_tensor.op
+                if producer.name not in visited:
+                    queue.append(producer)
 
-        all_operation_names = set()
-        for operation in graph.get_operations():
-            all_operation_names.add(operation.name)
+        if len(visited) > len(best_visited):
+            best_seed = seed.name
+            best_visited = visited
 
-        # Update optimal partition if current size is larger
-        if len(visited) > max_size:
-            max_size = len(visited)
-            optimal_partition = (visited, all_operation_names - visited)
-
-    return optimal_partition
-
-
-def traverse_graph(op):
-  """
-  Recursive function to traverse the graph node by node.
-
-  Args:
-    op: A TensorFlow Operation object.
-  """
-  # Print information about the current node
-  """print(f"Node Name: {op.name}")
-  print(f"Node Type: {op.type}")
-  print(f"Node inputs: {op.inputs}")"""
-
-  # Iterate through the input tensors of the current operation
-  for input_tensor in op.inputs:
-    # Get the operation that produces this input tensor
-    producer_op = input_tensor.op
-
-    # Recursively call the function on the producer operation
-    traverse_graph(producer_op)
-
-def main():
-    tfv1 = tf.compat.v1
-    gdef = tfv1.GraphDef()
-    with tfv1.io.gfile.GFile("/Users/yektakocaogullar/Desktop/DLC_ma_superquadruped_resnet_50_iteration-0_shuffle-1/snapshot-700000.pb","rb") as f:
-        gdef.ParseFromString(f.read())
-
-    g = tf.Graph()
-    with g.as_default():
-        tf.graph_util.import_graph_def(gdef, name='DLC')
-
-    """for i in range(len(g.get_operations())):
-        if "Add" in  g.get_operations()[i].name:
-            print(g.get_operations()[i].name)"""
-
-    #find_all_blue_nodes(g)
-
-    #first_op = g.get_operation_by_name(g.get_operations()[len(g.get_operations())-1].name)
-    #traverse_graph(first_op)
-
-    #print(find_max_blue_subgraph(g, starting_node))
-
-    print(find_max_blue_subgraph(g))
-
-    #print(g.get_operation_by_name(g.get_operations()[len(g.get_operations())-1].name).inputs)
-    #print(g.get_operation_by_name(g.get_operations()[len(g.get_operations())-1].name))
+    return {
+        "size": len(best_visited),
+        "seed_op": best_seed,
+        "op_names": sorted(best_visited),
+    }
 
 
+def enumerate_partition_candidates(graph, compatible_only: bool = False, max_candidates: int | None = None) -> list[dict]:
+    candidates = []
 
-if __name__ == '__main__':
+    for index, op in enumerate(graph.get_operations()):
+        if op.type in SKIP_CANDIDATE_OP_TYPES:
+            continue
+        if compatible_only and not is_potentially_tpu_compatible_op(op):
+            continue
+        if not op.outputs:
+            continue
+
+        output_tensors = []
+        for tensor in op.outputs:
+            shape = tensor.shape.as_list() if tensor.shape.rank is not None else None
+            output_tensors.append(
+                {
+                    "name": tensor.name,
+                    "shape": shape,
+                    "dtype": tensor.dtype.name,
+                }
+            )
+
+        candidate = {
+            "partition_id": f"candidate_{index}_{op.name.replace('/', '_')}",
+            "op_name": op.name,
+            "op_type": op.type,
+            "topological_index": index,
+            "num_inputs": len(op.inputs),
+            "num_outputs": len(op.outputs),
+            "potential_tpu_compatible": is_potentially_tpu_compatible_op(op),
+            "output_tensors": output_tensors,
+        }
+        candidates.append(candidate)
+
+        if max_candidates is not None and len(candidates) >= max_candidates:
+            break
+
+    return candidates
+
+
+def main() -> None:
+    args = parse_args()
+    config = load_config(args.config)
+    graph = import_graph(load_graph_def(config["model_path"]))
+
+    compatible_ops = find_all_potentially_tpu_compatible_ops(graph)
+    max_subgraph = find_max_tpu_compatible_backward_closure(graph)
+    candidates = enumerate_partition_candidates(
+        graph,
+        compatible_only=args.compatible_only,
+        max_candidates=args.max_candidates,
+    )
+
+    payload = {
+        "task_name": config["task_name"],
+        "model_path": config["model_path"],
+        "num_ops": len(graph.get_operations()),
+        "num_potentially_tpu_compatible_ops": len(compatible_ops),
+        "max_tpu_compatible_backward_closure": max_subgraph,
+        "num_candidates": len(candidates),
+        "candidates": candidates,
+    }
+    save_json(config["candidate_output_path"], payload)
+
+    print(f"Enumerated {len(candidates)} candidate partition points.")
+    print(f"Potentially TPU-compatible ops: {len(compatible_ops)} / {len(graph.get_operations())}")
+    print(
+        "Largest TPU-compatible backward closure:",
+        max_subgraph["size"],
+        "ops",
+        f"(seed={max_subgraph['seed_op']})",
+    )
+    print(f"Saved candidate list to: {config['candidate_output_path']}")
+
+
+if __name__ == "__main__":
     main()

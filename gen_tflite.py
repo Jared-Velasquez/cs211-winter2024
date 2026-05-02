@@ -1,43 +1,71 @@
-import tensorflow as tf
-tf1 = tf.compat.v1
+from __future__ import annotations
 
-ORIG_MODEL="snapshot-1000.pb"
-OUTPUT_MODEL="DLC_ma_sub_p1_320_320"
+import argparse
+import shutil
 
-def main():
-    gdef = tf1.GraphDef()
-    with tf1.io.gfile.GFile(ORIG_MODEL,"rb") as f:
-        gdef.ParseFromString(f.read())
+from src.config_utils import get_boundary_tensors, load_config
+from src.graph_utils import extract_prefix_graph_def, export_saved_model_from_graph_def
+from src.io_utils import ensure_directory, save_json
 
-    g = tf.Graph()
-    with g.as_default():
-       tf.graph_util.import_graph_def(gdef, name='')
 
-    new_graph=tf.Graph()
-    with new_graph.as_default():
-        new_input = tf1.placeholder(dtype=tf.float32, shape=[1,320,320,3], name='Placeholder')
-        tf1.import_graph_def(g.as_graph_def(), name='', input_map={'Placeholder':new_input})
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Extract a prefix subgraph from a frozen .pb and export it as a SavedModel."
+    )
+    parser.add_argument(
+        "--config",
+        default="configs/task_a_dlc.json",
+        help="Path to the task config JSON.",
+    )
+    parser.add_argument(
+        "--boundary-tensors",
+        nargs="+",
+        default=None,
+        help="Override boundary tensor names for this export.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="Override the output SavedModel directory.",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite an existing SavedModel directory.",
+    )
+    return parser.parse_args()
 
-    gdef_sub = tf1.graph_util.extract_sub_graph(
-        new_graph.as_graph_def(),
-        ['pose/part_pred/block4/BiasAdd',
-         'pose/locref_pred/block4/BiasAdd'])
 
-    g2 = tf.Graph()
-    with g2.as_default():
-        tf.graph_util.import_graph_def(gdef_sub, name='')
+def main() -> None:
+    args = parse_args()
+    config = load_config(args.config)
+    boundary_tensors = get_boundary_tensors(config, override=args.boundary_tensors)
+    output_dir = args.output_dir or config["prefix_saved_model_dir"]
 
-    g2_input = g2.get_tensor_by_name('Placeholder:0')
-    g2_part_pred_output = g2.get_tensor_by_name('pose/part_pred/block4/BiasAdd:0')
-    g2_locref_pred_output = g2.get_tensor_by_name('pose/locref_pred/block4/BiasAdd:0')
+    if args.force:
+        shutil.rmtree(output_dir, ignore_errors=True)
+    elif ensure_directory(output_dir).exists() and any(ensure_directory(output_dir).iterdir()):
+        raise FileExistsError(f"Output directory already exists: {output_dir}. Use --force to overwrite it.")
 
-    with tf1.Session(graph=g2) as s2:
-        tf1.saved_model.simple_save(session=s2,
-            export_dir=OUTPUT_MODEL,
-            inputs={'input':g2_input},
-            outputs={
-                'part_pred_output': g2_part_pred_output,
-                'locref_pred_output': g2_locref_pred_output})
+    prefix_graph_def = extract_prefix_graph_def(
+        graph_path=config["model_path"],
+        boundary_tensors=boundary_tensors,
+        input_tensor_name=config["input_tensor"],
+        fixed_input_shape=config.get("fixed_input_shape"),
+    )
+    metadata = export_saved_model_from_graph_def(
+        prefix_graph_def,
+        export_dir=output_dir,
+        input_tensor_name=config["input_tensor"],
+        output_tensor_names=boundary_tensors,
+    )
+    metadata["boundary_tensors"] = boundary_tensors
+    metadata_path = f"{output_dir.rstrip('/')}_metadata.json"
+    save_json(metadata_path, metadata)
 
-if __name__ == '__main__':
+    print(f"Saved prefix SavedModel to: {output_dir}")
+    print(f"Saved metadata to: {metadata_path}")
+
+
+if __name__ == "__main__":
     main()

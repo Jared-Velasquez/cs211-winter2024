@@ -1,3 +1,14 @@
 DLC_ma_superquadruped_resnet_50_iteration-0_shuffle-1.tar.gz
 tpu-starter.tar.gz
 DLC_ma_superquadruped_resnet_50_iteration-0_shuffle-1/*
+artifacts/
+data/task_a/data/
+data/task_a/models/
+data/task_a/videos/
+data/task_b/
+data/task_c/
+__pycache__/
+.DS_Store
+.conda-baseline/
+.miniforge3/
+.cache/

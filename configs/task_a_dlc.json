@@ -1,0 +1,25 @@
+{
+  "task_name": "task_a_dlc",
+  "task_type": "pose_estimation",
+  "compute_accuracy": false,
+  "data_loader": "ap10k_pose",
+  "model_path": "data/task_a/models/snapshot-700000.pb",
+  "images_dir": "data/task_a/data/ap-10k/data",
+  "annotations_path": "data/task_a/data/ap-10k/annotations/ap10k-val-split1.json",
+  "input_tensor": "Placeholder:0",
+  "output_tensors": [
+    "concat_1:0"
+  ],
+  "boundary_tensors": [
+    "pose/part_pred/block4/BiasAdd:0",
+    "pose/locref_pred/block4/BiasAdd:0"
+  ],
+  "artifacts_dir": "artifacts/task_a/dlc",
+  "require_single_instance": true,
+  "annotation_strategy": "largest_instance",
+  "pck_thresholds": [
+    0.05,
+    0.1,
+    0.2
+  ]
+}

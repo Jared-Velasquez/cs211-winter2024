@@ -1,0 +1,23 @@
+{
+  "task_name": "task_c_segmentation",
+  "task_type": "semantic_segmentation",
+  "compute_accuracy": true,
+  "data_loader": "voc_segmentation",
+  "model_path": "data/task_c/models/frozen_inference_graph.pb",
+  "tflite_model_path": "data/task_c/models/deeplabv3_mnv2_pascal_quant_edgetpu.tflite",
+  "images_dir": "data/task_c/data/pascal-voc-2012-DatasetNinja/val/img",
+  "annotations_dir": "data/task_c/data/pascal-voc-2012-DatasetNinja/val/ann",
+  "meta_path": "data/task_c/data/pascal-voc-2012-DatasetNinja/meta.json",
+  "input_tensor": "ImageTensor:0",
+  "output_tensors": [
+    "SemanticPredictions:0"
+  ],
+  "boundary_tensors": [],
+  "fixed_input_shape": [
+    1,
+    513,
+    513,
+    3
+  ],
+  "artifacts_dir": "artifacts/task_c/segmentation"
+}
