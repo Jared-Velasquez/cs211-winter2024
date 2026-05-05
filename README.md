@@ -41,6 +41,42 @@ These scripts share a small helper layer under [`src/`](./src):
 - [`configs/task_b_detection.json`](./configs/task_b_detection.json): current working Task B config
 - [`configs/task_c_segmentation.json`](./configs/task_c_segmentation.json): current working Task C config
 
+## How The Config Drives The Pipeline
+
+Each top-level script reads a single task config and uses it as the source of truth for:
+
+- which frozen graph to load
+- which dataset or video input loader to use
+- which input and output tensors to run
+- which boundary tensors define the split
+- where generated artifacts should be written
+
+The most important config fields are:
+
+- `task_name`: human-readable task identifier used in summaries
+- `task_type`: `pose_estimation`, `object_detection`, or `semantic_segmentation`
+- `data_loader`: which loader in `src/data_loaders.py` to use
+- `model_path`: the full float32 frozen graph `.pb`
+- `images_dir` or `video_path`: the task input source
+- `annotations_path` / `annotations_dir`: label source when a task uses labeled evaluation
+- `input_tensor`: graph input tensor name
+- `output_tensors`: final output tensor names for full-graph inference
+- `boundary_tensors`: the manual split point used by the partitioning scripts
+- `artifacts_dir`: directory where outputs for that config are saved
+- `compute_accuracy`: whether `run_baseline.py` should compute labeled metrics
+
+In other words:
+
+```text
+task config
+-> tells loaders where the inputs live
+-> tells TensorFlow which graph/tensors to run
+-> tells split scripts where to cut the graph
+-> tells every script where to save its outputs
+```
+
+Right now, the split behavior is still **manual and config-defined**. `auto_partition.py` only enumerates candidate graph points; it does not automatically choose and rewrite `boundary_tensors`.
+
 ## Data And Model Layout
 
 The repo now expects task-local artifacts under:
@@ -103,6 +139,56 @@ cd cs211-winter2024
 
 This keeps DeepLabCut and model export concerns outside this repo while still giving the baseline scripts a known-good TensorFlow environment.
 
+## Pipeline At A Glance
+
+The current repo supports two related but distinct flows:
+
+1. **Full float32 baseline flow**
+   Run the original frozen graph on CPU and save the reference predictions.
+
+2. **Partition / TPU-prep flow**
+   Cut the graph at a config-defined boundary, export the prefix, convert it to TFLite, and validate the split in CPU-only mode.
+
+The second flow is the scaffold that later Edge TPU execution will build on.
+
+## Script Inputs And Outputs
+
+This table is the quickest way to understand how the files interact with the config and with one another:
+
+| Script | Reads From Config | Main Purpose | Main Outputs |
+|---|---|---|---|
+| `tensorflow_run.py` | `model_path`, loader fields, `input_tensor`, `output_tensors`, `artifacts_dir` | Run the full frozen graph on CPU | `full_graph_outputs.npz`, `full_graph_summary.json` |
+| `run_baseline.py` | same as `tensorflow_run.py`, plus `compute_accuracy` | Run full CPU baseline and optionally compute task metrics | `full_graph_outputs.npz`, `full_graph_summary.json`, `baseline_results.json` |
+| `auto_partition.py` | `model_path` | Enumerate candidate graph points and TPU-compatible traversal scaffolding | `partition_candidates.json` |
+| `gen_tflite.py` | `model_path`, `input_tensor`, `boundary_tensors`, `artifacts_dir` | Extract the prefix subgraph at the chosen boundary | `prefix_saved_model/`, `prefix_saved_model_metadata.json` |
+| `convert.py` | prefix SavedModel path, task config, optional representative data settings | Convert the exported prefix into TFLite | `output.tflite` |
+| `split.py` | `model_path`, `input_tensor`, `boundary_tensors`, `output_tensors`, `artifacts_dir` | Export the split artifacts in one pass | `prefix_saved_model/`, `suffix_graph.pb`, `split_metadata.json` |
+| `updated_edgetpu_test.py` | `model_path`, loader fields, `boundary_tensors`, `output_tensors`, `artifacts_dir` | Validate the split path, currently in CPU-only mode | `partitioned_cpu_outputs.npz`, `boundary_outputs.npz`, `partitioned_cpu_summary.json` |
+| `import_pb.py` | `model_path` | Visualize the graph in TensorBoard | TensorBoard log directory |
+
+### Important artifact details
+
+- The **base model** is the original frozen TensorFlow graph:
+  - format: `.pb`
+- The **prefix export** is currently saved as a **SavedModel**, not as a raw prefix `.pb`:
+  - directory: `prefix_saved_model/`
+  - this is what `convert.py` consumes
+- The **suffix export** is currently saved as:
+  - `suffix_graph.pb`
+- The **TFLite prefix artifact** is:
+  - `output.tflite`
+
+So the current split artifact chain looks like:
+
+```text
+full frozen graph (.pb)
+-> prefix SavedModel
+-> prefix TFLite (.tflite)
+
+full frozen graph (.pb)
+-> suffix graph (.pb)
+```
+
 ## Task A Split Workflow
 
 ### 1. Float32 baseline
@@ -148,6 +234,8 @@ This writes:
 - `artifacts/task_a/dlc/prefix_saved_model/`
 - `artifacts/task_a/dlc/prefix_saved_model_metadata.json`
 
+This step uses `boundary_tensors` from the config. Those tensors are the manual definition of the split point.
+
 ### 4. Convert the prefix to TFLite
 
 ```bash
@@ -158,6 +246,8 @@ This writes:
 ```
 
 This gives the TFLite prefix artifact that later TPU compilation will consume.
+
+At this stage the model is **TFLite**, but not yet **Edge TPU compiled**.
 
 ### 5. Export generalized split metadata
 
@@ -170,6 +260,8 @@ This writes:
 - `artifacts/task_a/dlc/prefix_saved_model/`
 - `artifacts/task_a/dlc/suffix_graph.pb`
 - `artifacts/task_a/dlc/split_metadata.json`
+
+`split_metadata.json` is the main record of what split was used and which artifacts belong to it.
 
 ### 6. Validate the split in CPU-only mode
 
@@ -184,6 +276,15 @@ This writes:
 - `artifacts/task_a/dlc/partitioned_cpu_summary.json`
 
 The current working DLC split reproduces the full float32 outputs exactly in CPU-only validation.
+
+This script is the current stand-in for the future TPU path:
+
+- it runs the prefix on CPU
+- captures the boundary tensors
+- feeds those tensors into the suffix on CPU
+- compares the result against the full baseline
+
+It verifies the **split logic**, but it does **not** currently run a compiled Edge TPU model.
 
 ## Float32 Baselines
 
@@ -244,6 +345,64 @@ That means the current no-hardware sanity check is:
 - verify the files exist in the expected paths
 - verify TensorFlow can run the frozen `.pb` baselines
 - verify the Edge TPU `.tflite` files are recognized as Edge TPU builds by their unresolved `edgetpu-custom-op`
+
+## What Is Still Missing For Real Edge TPU Support
+
+The current repo stops just before the actual Coral runtime step.
+
+What is already present:
+
+- config-defined manual split points
+- prefix extraction as a SavedModel
+- TFLite conversion for the prefix
+- suffix graph export
+- CPU-only split validation through `updated_edgetpu_test.py`
+
+What still needs to be added for actual TPU execution:
+
+1. **Edge TPU compilation step**
+   After `convert.py`, the prefix `.tflite` still needs to be compiled with `edgetpu_compiler`.
+
+2. **Compiled-model runtime loading**
+   `updated_edgetpu_test.py` needs a real Edge TPU execution path that:
+   - loads the compiled TFLite with the Coral runtime
+   - runs the prefix on the TPU
+   - reads back the prefix outputs
+
+3. **Boundary tensor handoff from TPU to suffix**
+   The TPU-produced prefix outputs need to be reshaped and fed into the suffix graph exactly the same way the current CPU-only validation path does.
+
+4. **Device-side timing and logging**
+   The TPU path should save:
+   - TPU inference time
+   - host-side suffix time
+   - boundary tensor sizes / transfer info
+   - final predictions
+
+5. **Job / artifact handoff**
+   If Student C runs experiments on the Raspberry Pi + Coral device, the likely next addition is a small job manifest / executor layer rather than changing the existing task configs.
+
+The key point is:
+
+```text
+the config system does not need to be replaced for TPU support
+```
+
+Instead, TPU support should plug into the current structure by consuming the same config-defined:
+
+- `model_path`
+- `boundary_tensors`
+- `output_tensors`
+- `artifacts_dir`
+
+and by extending `updated_edgetpu_test.py` from:
+
+- `full_cpu`
+- `partitioned_cpu`
+
+to eventually include a true:
+
+- `tpu_cpu`
 
 ## Graph Visualization
 
