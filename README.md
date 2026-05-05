@@ -10,24 +10,24 @@ The current baseline now covers:
 
 The split / TPU-prep path is only verified end to end for Task A right now. Tasks B and C are currently set up through the float32 baseline and metric-evaluation stage.
 
-The model download/export step stays **outside** this repo. For DLC, that workflow lives in [model_export](/Users/jef/Desktop/219-project/model_export).
+The model download/export step stays **outside** this repo. For DLC, that workflow lives in the sibling `model_export/` directory.
 
 ## Current Layout
 
 ### Top-level scripts
 
-- [tensorflow_run.py](/Users/jef/Desktop/219-project/cs211-winter2024/tensorflow_run.py): float32 full-graph baseline runner
-- [run_baseline.py](/Users/jef/Desktop/219-project/cs211-winter2024/run_baseline.py): float32 baseline runner; saves prediction baselines for all tasks and accuracy metrics where enabled
-- [gen_tflite.py](/Users/jef/Desktop/219-project/cs211-winter2024/gen_tflite.py): exports the TPU prefix as a SavedModel for an arbitrary boundary
-- [convert.py](/Users/jef/Desktop/219-project/cs211-winter2024/convert.py): converts the SavedModel prefix to TFLite
-- [split.py](/Users/jef/Desktop/219-project/cs211-winter2024/split.py): exports split artifacts and metadata for a chosen boundary
-- [updated_edgetpu_test.py](/Users/jef/Desktop/219-project/cs211-winter2024/updated_edgetpu_test.py): reusable `HybridRunner` validation path; currently used in CPU-only partitioned mode
-- [auto_partition.py](/Users/jef/Desktop/219-project/cs211-winter2024/auto_partition.py): generic graph candidate enumerator plus TPU-compatibility/BFS scaffold for Student B to extend
-- [import_pb.py](/Users/jef/Desktop/219-project/cs211-winter2024/import_pb.py): graph visualization helper for TensorBoard
+- [`tensorflow_run.py`](./tensorflow_run.py): float32 full-graph baseline runner
+- [`run_baseline.py`](./run_baseline.py): float32 baseline runner; saves prediction baselines for all tasks and accuracy metrics where enabled
+- [`gen_tflite.py`](./gen_tflite.py): exports the TPU prefix as a SavedModel for an arbitrary boundary
+- [`convert.py`](./convert.py): converts the SavedModel prefix to TFLite
+- [`split.py`](./split.py): exports split artifacts and metadata for a chosen boundary
+- [`updated_edgetpu_test.py`](./updated_edgetpu_test.py): reusable `HybridRunner` validation path; currently used in CPU-only partitioned mode
+- [`auto_partition.py`](./auto_partition.py): generic graph candidate enumerator plus TPU-compatibility/BFS scaffold for Student B to extend
+- [`import_pb.py`](./import_pb.py): graph visualization helper for TensorBoard
 
 ### Minimal shared helpers
 
-These scripts share a small helper layer under [src](/Users/jef/Desktop/219-project/cs211-winter2024/src):
+These scripts share a small helper layer under [`src/`](./src):
 
 - `config_utils.py`: load concise JSON task configs
 - `graph_utils.py`: load/import frozen graphs, extract prefix/suffix graph defs
@@ -37,9 +37,9 @@ These scripts share a small helper layer under [src](/Users/jef/Desktop/219-proj
 
 ### Configs
 
-- [configs/task_a_dlc.json](/Users/jef/Desktop/219-project/cs211-winter2024/configs/task_a_dlc.json): current working Task A config
-- [configs/task_b_detection.json](/Users/jef/Desktop/219-project/cs211-winter2024/configs/task_b_detection.json): current working Task B config
-- [configs/task_c_segmentation.json](/Users/jef/Desktop/219-project/cs211-winter2024/configs/task_c_segmentation.json): current working Task C config
+- [`configs/task_a_dlc.json`](./configs/task_a_dlc.json): current working Task A config
+- [`configs/task_b_detection.json`](./configs/task_b_detection.json): current working Task B config
+- [`configs/task_c_segmentation.json`](./configs/task_c_segmentation.json): current working Task C config
 
 ## Data And Model Layout
 
@@ -91,16 +91,17 @@ For Task C, only the `val/` split is kept locally in the current repo layout bec
 
 ## Environment
 
-For the baseline repo itself, you only need TensorFlow + NumPy + OpenCV. A minimal dependency list is in [requirements.txt](/Users/jef/Desktop/219-project/cs211-winter2024/requirements.txt).
+For the baseline repo itself, you only need TensorFlow + NumPy + OpenCV. A minimal dependency list is in [`requirements.txt`](./requirements.txt), and the repo-local conda environment spec is in [`environment.yml`](./environment.yml).
 
-For now, the easiest working environment is the same local conda env already used by the DLC export workflow:
+Create the repo-local environment with:
 
 ```bash
-cd /Users/jef/Desktop/219-project/cs211-winter2024
+cd cs211-winter2024
+./setup_env.sh
 ./run_in_env.sh python <script>.py ...
 ```
 
-That keeps DeepLabCut and model export concerns outside this repo while still giving the baseline scripts a known-good TensorFlow environment.
+This keeps DeepLabCut and model export concerns outside this repo while still giving the baseline scripts a known-good TensorFlow environment.
 
 ## Task A Split Workflow
 
@@ -109,7 +110,7 @@ That keeps DeepLabCut and model export concerns outside this repo while still gi
 Run the full frozen graph entirely on CPU:
 
 ```bash
-cd /Users/jef/Desktop/219-project/cs211-winter2024
+cd cs211-winter2024
 ./run_in_env.sh python tensorflow_run.py --config configs/task_a_dlc.json --frame-limit 2
 ```
 
@@ -186,7 +187,7 @@ The current working DLC split reproduces the full float32 outputs exactly in CPU
 
 ## Float32 Baselines
 
-Use [run_baseline.py](/Users/jef/Desktop/219-project/cs211-winter2024/run_baseline.py) when you want a clean float32 baseline record saved. It always writes raw predictions and inference summaries; it only computes labeled accuracy metrics when the task config enables `compute_accuracy`.
+Use [`run_baseline.py`](./run_baseline.py) when you want a clean float32 baseline record saved. It always writes raw predictions and inference summaries; it only computes labeled accuracy metrics when the task config enables `compute_accuracy`.
 
 Examples:
 
@@ -253,7 +254,7 @@ That means the current no-hardware sanity check is:
   --graph=data/task_a/models/snapshot-700000.pb \
   --log_dir=./tb_logs
 
-../model_export/.conda-export/bin/tensorboard --logdir=tb_logs --port=6006 --host=localhost
+./run_in_env.sh python -m tensorboard.main --logdir=tb_logs --port=6006 --host=localhost
 ```
 
 ## Current Scope
