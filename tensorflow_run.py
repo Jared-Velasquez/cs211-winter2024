@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import argparse
 import time
+from typing import Any
 
 import tensorflow as tf
 
 from src.config_utils import load_config
-from src.data_loaders import load_samples
+from src.data_loaders import iter_samples
 from src.graph_utils import import_graph, load_graph_def
 from src.io_utils import ensure_directory, save_json, save_npz, stack_named_outputs, tensor_name_to_key
 
@@ -21,6 +22,10 @@ def summarize_output_shapes(stacked_outputs: dict) -> dict:
         else:
             summary[key] = list(value.shape)
     return summary
+
+
+def _sample_without_input(sample: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in sample.items() if key != "input"}
 
 
 def parse_args() -> argparse.Namespace:
@@ -40,29 +45,30 @@ def parse_args() -> argparse.Namespace:
 
 
 def run_full_graph(config: dict, frame_limit: int | None = None) -> dict:
-    samples = load_samples(config, frame_limit=frame_limit)
-    if not samples:
-        raise RuntimeError("No input samples were loaded.")
-
     graph = import_graph(load_graph_def(config["model_path"]))
     input_tensor = graph.get_tensor_by_name(config["input_tensor"])
     output_tensor_names = list(config["output_tensors"])
     output_tensors = [graph.get_tensor_by_name(name) for name in output_tensor_names]
 
+    samples = []
     per_frame_outputs = []
     timings_ms = []
 
     with tf1.Session(graph=graph) as session:
-        for sample in samples:
+        for sample in iter_samples(config, frame_limit=frame_limit):
             start_time = time.time()
             values = session.run(output_tensors, feed_dict={input_tensor: sample["input"]})
             timings_ms.append((time.time() - start_time) * 1000.0)
+            samples.append(_sample_without_input(sample))
             per_frame_outputs.append(
                 {
                     tensor_name_to_key(name): value
                     for name, value in zip(output_tensor_names, values)
                 }
             )
+
+    if not samples:
+        raise RuntimeError("No input samples were loaded.")
 
     stacked_outputs = stack_named_outputs(per_frame_outputs)
     ensure_directory(config["artifacts_dir"])
