@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 
 import tensorflow as tf
 
 from src.config_utils import load_config
-from src.data_loaders import load_video_frames
+from src.data_loaders import load_samples
 
 
 def parse_args() -> argparse.Namespace:
@@ -29,7 +30,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--rep-video",
         default=None,
-        help="Representative video to use for int quantization. Defaults to the task video path.",
+        help="Optional representative video override for int quantization. Defaults to the config data loader.",
     )
     parser.add_argument(
         "--frame-limit",
@@ -45,8 +46,10 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def make_representative_dataset(video_path: str, resize: list[int] | None, frame_limit: int):
-    dataset = load_video_frames(video_path, resize=resize, frame_limit=frame_limit)
+def make_representative_dataset(config: dict, frame_limit: int):
+    dataset = load_samples(config, frame_limit=frame_limit)
+    if not dataset:
+        raise RuntimeError("No representative samples were loaded for TFLite quantization.")
 
     def generator():
         for sample in dataset:
@@ -60,10 +63,11 @@ def main() -> None:
     config = load_config(args.config)
 
     model_path = args.model or config["prefix_saved_model_dir"]
-    rep_video = args.rep_video or config["video_path"]
 
-    if args.opt in {"int_fallback", "int8_pure"} and not rep_video:
-        raise ValueError("A representative video is required for full int quantization.")
+    if args.rep_video:
+        config = dict(config)
+        config["data_loader"] = "video_frames"
+        config["video_path"] = args.rep_video
 
     converter = tf.lite.TFLiteConverter.from_saved_model(model_path)
 
@@ -73,12 +77,9 @@ def main() -> None:
         if args.opt == "float16":
             converter.target_spec.supported_types = [tf.float16]
         elif args.opt in {"int_fallback", "int8_pure"}:
-            representative_dataset, num_frames = make_representative_dataset(
-                rep_video,
-                resize=config.get("resize"),
-                frame_limit=args.frame_limit,
-            )
-            print(f"Loaded {num_frames} representative frames from {rep_video}")
+            representative_dataset, num_frames = make_representative_dataset(config, frame_limit=args.frame_limit)
+            data_source = config.get("video_path") or config.get("images_dir")
+            print(f"Loaded {num_frames} representative samples from {data_source}")
             converter.representative_dataset = representative_dataset
             if args.opt == "int8_pure":
                 converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS_INT8]
@@ -86,10 +87,12 @@ def main() -> None:
                 converter.inference_output_type = tf.float32
 
     tflite_model = converter.convert()
-    with open(args.output, "wb") as handle:
+    output_path = Path(args.output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("wb") as handle:
         handle.write(tflite_model)
 
-    print(f"Saved TFLite model to: {args.output}")
+    print(f"Saved TFLite model to: {output_path}")
 
 
 if __name__ == "__main__":

@@ -21,7 +21,14 @@ def compare_named_outputs(reference_outputs: dict[str, np.ndarray], candidate_ou
     mean_abs_diff = 0.0
 
     for key, reference_value in reference_outputs.items():
+        if key not in candidate_outputs:
+            raise KeyError(f"Candidate outputs are missing expected key: {key}")
         candidate_value = candidate_outputs[key]
+        if reference_value.shape != candidate_value.shape:
+            raise ValueError(
+                f"Output shape mismatch for {key}: "
+                f"reference {reference_value.shape}, candidate {candidate_value.shape}"
+            )
         diff = np.abs(reference_value - candidate_value)
         diffs[key] = {
             "shape": list(reference_value.shape),
@@ -61,6 +68,7 @@ class HybridRunner:
         self.boundary_tensors = get_boundary_tensors(config, override=boundary_tensors)
 
     def run_full_cpu(self, samples: list[dict[str, Any]]) -> tuple[dict[str, np.ndarray], list[float]]:
+        self._require_samples(samples)
         graph = import_graph(load_graph_def(self.config["model_path"]))
         input_tensor = graph.get_tensor_by_name(self.config["input_tensor"])
         output_tensor_names = list(self.config["output_tensors"])
@@ -83,6 +91,7 @@ class HybridRunner:
         return stack_named_outputs(per_frame_outputs), timings_ms
 
     def run_float_prefix(self, samples: list[dict[str, Any]]) -> tuple[dict[str, np.ndarray], list[float]]:
+        self._require_samples(samples)
         prefix_graph = import_graph(
             extract_prefix_graph_def(
                 graph_path=self.config["model_path"],
@@ -162,6 +171,7 @@ class HybridRunner:
         samples: list[dict[str, Any]],
         compiled_tflite_path: str,
     ) -> dict[str, Any]:
+        self._require_samples(samples)
         compiled_path = Path(compiled_tflite_path)
         if not compiled_path.exists():
             raise FileNotFoundError(
@@ -185,7 +195,10 @@ class HybridRunner:
         timings = []
         for sample in samples:
             total_start = time.perf_counter()
+            transfer_ms = 0.0
+            transfer_start = time.perf_counter()
             self._set_tflite_input(interpreter, input_detail, sample["input"], input_scale, input_zero_point)
+            transfer_ms += (time.perf_counter() - transfer_start) * 1000.0
 
             tpu_start = time.perf_counter()
             interpreter.invoke()
@@ -196,12 +209,12 @@ class HybridRunner:
             for boundary_tensor, output_detail in zip(self.boundary_tensors, output_details):
                 raw_value = interpreter.get_tensor(output_detail["index"])
                 boundary_values[tensor_name_to_key(boundary_tensor)] = self._dequantize_output(raw_value, output_detail)
-            t_transfer = (time.perf_counter() - transfer_start) * 1000.0
+            transfer_ms += (time.perf_counter() - transfer_start) * 1000.0
             per_frame_boundaries.append(boundary_values)
             timings.append(
                 {
                     "t_tpu": t_tpu,
-                    "t_transfer": t_transfer,
+                    "t_transfer": transfer_ms,
                     "t_cpu": 0.0,
                     "t_total": (time.perf_counter() - total_start) * 1000.0,
                 }
@@ -229,15 +242,23 @@ class HybridRunner:
             )
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         suffix_graph_path = Path(metadata["suffix_graph_path"])
+        if not suffix_graph_path.is_absolute():
+            suffix_graph_path = metadata_path.parent / suffix_graph_path
         if not suffix_graph_path.exists():
             raise FileNotFoundError(
                 f"Suffix graph not found: {suffix_graph_path}. "
                 "Run split.py --config <config> --force before hybrid execution."
             )
+        metadata["suffix_graph_path"] = str(suffix_graph_path)
         for boundary_tensor in self.boundary_tensors:
             if boundary_tensor not in metadata["suffix_placeholder_map"]:
                 raise ValueError(f"Boundary tensor missing from split metadata: {boundary_tensor}")
         return metadata
+
+    @staticmethod
+    def _require_samples(samples: list[dict[str, Any]]) -> None:
+        if not samples:
+            raise RuntimeError("No input samples were loaded.")
 
     @staticmethod
     def _infer_sample_count(outputs: dict[str, np.ndarray]) -> int:
