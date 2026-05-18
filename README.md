@@ -49,6 +49,13 @@ The config controls:
 
 Current split behavior is still **manual**: the partition boundary comes directly from `boundary_tensors` in the config.
 
+Task A's TPU-prep config uses a static input contract:
+
+- `resize`: `[640, 480]` (`[width, height]`)
+- `fixed_input_shape`: `[1, 480, 640, 3]` (`[batch, height, width, channels]`)
+
+This keeps the generated prefix TFLite model compatible with `edgetpu_compiler`, which rejects dynamic tensor shapes.
+
 ## Main Scripts
 
 - [`tensorflow_run.py`](./tensorflow_run.py): run the full float32 frozen graph on CPU
@@ -129,9 +136,8 @@ Interpretation:
 
 ```bash
 ./run_in_env.sh python auto_partition.py --config configs/task_a_dlc.json
-./run_in_env.sh python gen_tflite.py --config configs/task_a_dlc.json --force
-./run_in_env.sh python convert.py --config configs/task_a_dlc.json --model artifacts/task_a/dlc/prefix_saved_model --output artifacts/task_a/dlc/output.tflite
 ./run_in_env.sh python split.py --config configs/task_a_dlc.json --force
+./run_in_env.sh python convert.py --config configs/task_a_dlc.json --model artifacts/task_a/dlc/prefix_saved_model --output artifacts/task_a/dlc/output.tflite
 ./run_in_env.sh python updated_edgetpu_test.py --config configs/task_a_dlc.json --frame-limit 2
 ./run_in_env.sh python run_hybrid.py --config configs/task_a_dlc.json --cpu-only --frame-limit 2
 ```
@@ -139,9 +145,8 @@ Interpretation:
 What this means:
 
 - `auto_partition.py` suggests possible graph points
-- `gen_tflite.py` cuts the graph at the chosen boundary
+- `split.py` cuts the graph at the chosen boundary and records prefix/suffix artifacts
 - `convert.py` turns the prefix into TFLite
-- `split.py` records the prefix/suffix artifacts for that split
 - `updated_edgetpu_test.py` checks that the split logic still reproduces the full output
 - `run_hybrid.py --cpu-only` checks the new shared runner before TPU hardware is involved
 
@@ -156,6 +161,16 @@ After externally compiling `artifacts/task_a/dlc/output.tflite` with `edgetpu_co
 
 If `--compiled-tflite` is omitted, the default is `output_edgetpu.tflite` under the task artifact directory.
 
+If you change `resize`, `fixed_input_shape`, or `boundary_tensors`, regenerate artifacts in order:
+
+```bash
+./run_in_env.sh python split.py --config configs/task_a_dlc.json --force
+./run_in_env.sh python convert.py --config configs/task_a_dlc.json --model artifacts/task_a/dlc/prefix_saved_model --output artifacts/task_a/dlc/output.tflite
+edgetpu_compiler artifacts/task_a/dlc/output.tflite -o artifacts/task_a/dlc
+```
+
+`convert.py` validates static input/output shapes by default. Use `--allow-dynamic` only for non-TPU debugging.
+
 ## Current TPU Status
 
 The repo currently stops **before** real Edge TPU execution.
@@ -169,11 +184,13 @@ What already exists:
 - CPU-only split validation
 - PyCoral-backed hybrid runner for compiled Edge TPU prefixes
 
-What is still missing:
+What is still needed outside this repo:
 
 1. compile `output.tflite` with `edgetpu_compiler`
 2. install the Coral runtime/PyCoral on the TPU host
 3. run the hybrid command against the compiled model
+
+The Edge TPU compiler is x86-64 only. ARM64 TPU machines can run the compiled `_edgetpu.tflite`, but should compile on an x86-64 Linux machine or in an x86-64 cloud/Colab environment and copy the compiled file back.
 
 So:
 

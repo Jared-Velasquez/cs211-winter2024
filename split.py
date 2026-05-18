@@ -84,6 +84,7 @@ def main() -> None:
         "boundary_tensors": boundary_tensors,
         "suffix_placeholder_map": placeholder_map,
         "output_tensors": list(config["output_tensors"]),
+        "resize": config.get("resize"),
         "fixed_input_shape": config.get("fixed_input_shape"),
         "prefix_saved_model": prefix_metadata,
     }

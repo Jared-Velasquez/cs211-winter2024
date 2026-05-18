@@ -7,6 +7,16 @@
   "images_dir": "data/task_a/data/ap-10k/data",
   "annotations_path": "data/task_a/data/ap-10k/annotations/ap10k-val-split1.json",
   "input_tensor": "Placeholder:0",
+  "resize": [
+    640,
+    480
+  ],
+  "fixed_input_shape": [
+    1,
+    480,
+    640,
+    3
+  ],
   "output_tensors": [
     "concat_1:0"
   ],

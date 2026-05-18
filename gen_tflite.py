@@ -60,6 +60,8 @@ def main() -> None:
         output_tensor_names=boundary_tensors,
     )
     metadata["boundary_tensors"] = boundary_tensors
+    metadata["resize"] = config.get("resize")
+    metadata["fixed_input_shape"] = config.get("fixed_input_shape")
     metadata_path = f"{output_dir.rstrip('/')}_metadata.json"
     save_json(metadata_path, metadata)
 

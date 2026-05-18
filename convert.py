@@ -43,6 +43,11 @@ def parse_args() -> argparse.Namespace:
         default="output.tflite",
         help="Output TFLite path.",
     )
+    parser.add_argument(
+        "--allow-dynamic",
+        action="store_true",
+        help="Allow dynamic tensor shapes in the generated TFLite model. This is not suitable for Edge TPU compilation.",
+    )
     return parser.parse_args()
 
 
@@ -56,6 +61,32 @@ def make_representative_dataset(config: dict, frame_limit: int):
             yield [sample["input"]]
 
     return generator, len(dataset)
+
+
+def validate_static_tflite_model(model_content: bytes) -> None:
+    interpreter = tf.lite.Interpreter(model_content=model_content)
+    dynamic_tensors = []
+    for detail in interpreter.get_input_details() + interpreter.get_output_details():
+        shape_signature = detail.get("shape_signature")
+        if shape_signature is not None and any(dim < 0 for dim in shape_signature):
+            dynamic_tensors.append(
+                {
+                    "name": detail.get("name"),
+                    "shape_signature": [int(dim) for dim in shape_signature],
+                }
+            )
+
+    if dynamic_tensors:
+        formatted = ", ".join(
+            f"{item['name']} shape_signature={item['shape_signature']}"
+            for item in dynamic_tensors
+        )
+        raise ValueError(
+            "Generated TFLite model has dynamic input/output tensor shapes, which Edge TPU compilation rejects. "
+            "Set matching `resize` and `fixed_input_shape` values in the task config, regenerate the split artifacts, "
+            f"and rerun conversion. Dynamic tensors: {formatted}. "
+            "Use --allow-dynamic only for non-TPU debugging."
+        )
 
 
 def main() -> None:
@@ -87,6 +118,9 @@ def main() -> None:
                 converter.inference_output_type = tf.float32
 
     tflite_model = converter.convert()
+    if not args.allow_dynamic:
+        validate_static_tflite_model(tflite_model)
+
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("wb") as handle:
