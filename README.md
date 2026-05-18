@@ -171,6 +171,14 @@ edgetpu_compiler artifacts/task_a/dlc/output.tflite -o artifacts/task_a/dlc
 
 `convert.py` validates static input/output shapes by default. Use `--allow-dynamic` only for non-TPU debugging.
 
+For int8 calibration on an incomplete AP-10K download, skip missing images explicitly:
+
+```bash
+./run_in_env.sh python convert.py --config configs/task_a_dlc.json --model artifacts/task_a/dlc/prefix_saved_model --output artifacts/task_a/dlc/output_int8.tflite --opt int_fallback --frame-limit 100 --skip-missing-images
+```
+
+This is useful for representative calibration/debugging with partial data. A complete dataset is still preferable for final baseline or accuracy work.
+
 ## Current TPU Status
 
 The repo currently stops **before** real Edge TPU execution.

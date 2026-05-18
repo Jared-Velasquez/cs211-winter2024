@@ -101,6 +101,7 @@ def load_ap10k_pose_dataset(
     frame_limit: int | None = None,
     require_single_instance: bool = True,
     annotation_strategy: str = "largest_instance",
+    skip_missing_images: bool = False,
 ) -> list[dict[str, Any]]:
     images_root = Path(images_dir)
     annotations = json.loads(Path(annotations_path).read_text(encoding="utf-8"))
@@ -112,6 +113,7 @@ def load_ap10k_pose_dataset(
         annotations_by_image_id.setdefault(annotation["image_id"], []).append(annotation)
 
     samples: list[dict[str, Any]] = []
+    skipped_missing: list[str] = []
     for image_id, image_info in image_by_id.items():
         image_annotations = annotations_by_image_id.get(image_id, [])
         if not image_annotations:
@@ -125,7 +127,13 @@ def load_ap10k_pose_dataset(
             annotation = image_annotations[0]
 
         image_path = images_root / image_info["file_name"]
-        image, original_shape = _load_image_as_rgb(image_path, resize=resize)
+        try:
+            image, original_shape = _load_image_as_rgb(image_path, resize=resize)
+        except FileNotFoundError:
+            if not skip_missing_images:
+                raise
+            skipped_missing.append(image_info["file_name"])
+            continue
         keypoints = np.asarray(annotation.get("keypoints", []), dtype=np.float32).reshape(-1, 3)
         category = category_by_id[annotation["category_id"]]
 
@@ -147,6 +155,11 @@ def load_ap10k_pose_dataset(
         )
         if frame_limit is not None and len(samples) >= frame_limit:
             break
+
+    if skipped_missing:
+        preview = ", ".join(skipped_missing[:5])
+        suffix = "" if len(skipped_missing) <= 5 else ", ..."
+        print(f"Skipped {len(skipped_missing)} missing AP-10K images: {preview}{suffix}")
 
     return samples
 
@@ -278,6 +291,7 @@ def load_samples(config: dict[str, Any], frame_limit: int | None = None) -> list
             frame_limit=frame_limit,
             require_single_instance=config.get("require_single_instance", True),
             annotation_strategy=config.get("annotation_strategy", "largest_instance"),
+            skip_missing_images=config.get("skip_missing_images", False),
         )
 
     raise ValueError(f"Unsupported data loader '{loader}'.")

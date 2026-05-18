@@ -48,13 +48,22 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Allow dynamic tensor shapes in the generated TFLite model. This is not suitable for Edge TPU compilation.",
     )
+    parser.add_argument(
+        "--skip-missing-images",
+        action="store_true",
+        help="Skip missing AP-10K image files while loading representative samples for quantization.",
+    )
     return parser.parse_args()
 
 
 def make_representative_dataset(config: dict, frame_limit: int):
     dataset = load_samples(config, frame_limit=frame_limit)
     if not dataset:
-        raise RuntimeError("No representative samples were loaded for TFLite quantization.")
+        raise RuntimeError(
+            "No representative samples were loaded for TFLite quantization. "
+            "Check the configured data paths; if AP-10K images are missing, "
+            "--skip-missing-images can skip missing files but still requires at least one valid sample."
+        )
 
     def generator():
         for sample in dataset:
@@ -99,6 +108,9 @@ def main() -> None:
         config = dict(config)
         config["data_loader"] = "video_frames"
         config["video_path"] = args.rep_video
+    elif args.skip_missing_images:
+        config = dict(config)
+        config["skip_missing_images"] = True
 
     converter = tf.lite.TFLiteConverter.from_saved_model(model_path)
 
