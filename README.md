@@ -17,6 +17,15 @@ cd cs211-winter2024
 ./setup_env.sh
 ```
 
+`setup_env.sh` now prefers a repo-local `.venv/` when a compatible Python
+(`3.9`-`3.11`) is available, and falls back to `.conda-baseline/` otherwise.
+You can force either mode with:
+
+```bash
+./setup_env.sh --venv
+./setup_env.sh --conda
+```
+
 Run any script with:
 
 ```bash
@@ -25,10 +34,10 @@ Run any script with:
 
 Important files:
 
-- [`environment.yml`](./environment.yml): conda environment spec
+- [`environment.yml`](./environment.yml): conda fallback environment spec
 - [`requirements.txt`](./requirements.txt): minimal Python dependency list
-- [`setup_env.sh`](./setup_env.sh): creates `.conda-baseline/`
-- [`run_in_env.sh`](./run_in_env.sh): runs Python inside the repo-local env
+- [`setup_env.sh`](./setup_env.sh): creates `.venv/` by default, or `.conda-baseline/` as fallback
+- [`run_in_env.sh`](./run_in_env.sh): runs Python inside whichever repo-local env exists
 
 ## Config-Driven Flow
 
