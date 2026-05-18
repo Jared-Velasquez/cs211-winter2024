@@ -122,6 +122,39 @@ Important detail:
 
 ## Typical Usage
 
+### Command Cheat Sheet
+
+Setup:
+
+```bash
+cd cs211-winter2024
+./setup_env.sh
+./run_in_env.sh python -c "import tensorflow as tf; print(tf.__version__)"
+```
+
+Baselines:
+
+```bash
+./run_in_env.sh python run_baseline.py --config configs/task_a_dlc.json --frame-limit 100
+./run_in_env.sh python run_baseline.py --config configs/task_b_detection.json --frame-limit 100
+./run_in_env.sh python run_baseline.py --config configs/task_c_segmentation.json --frame-limit 100
+```
+
+Split / TPU-prep:
+
+```bash
+./run_in_env.sh python auto_partition.py --config configs/task_a_dlc.json
+./run_in_env.sh python split.py --config configs/task_a_dlc.json --force
+./run_in_env.sh python convert.py --config configs/task_a_dlc.json --model artifacts/task_a/dlc/prefix_saved_model --output artifacts/task_a/dlc/output.tflite
+```
+
+Split validation:
+
+```bash
+./run_in_env.sh python updated_edgetpu_test.py --config configs/task_a_dlc.json --frame-limit 2
+./run_in_env.sh python run_hybrid.py --config configs/task_a_dlc.json --cpu-only --frame-limit 2
+```
+
 ### Full float32 baseline
 
 ```bash
