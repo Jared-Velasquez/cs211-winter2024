@@ -68,6 +68,10 @@ Current split behavior is still **manual**: the partition boundary comes directl
 - [`updated_edgetpu_test.py`](./updated_edgetpu_test.py): validate the split path
   - currently CPU-only
   - writes `partitioned_cpu_outputs.npz`, `boundary_outputs.npz`, and `partitioned_cpu_summary.json`
+- [`run_hybrid.py`](./run_hybrid.py): run the generalized hybrid path
+  - CPU-only mode validates the shared split runner without PyCoral
+  - TPU mode loads a compiled Edge TPU prefix, dequantizes boundary tensors, and runs the CPU suffix
+  - writes `hybrid_tpu_outputs.npz`, `hybrid_tpu_boundary_dequantized.npz`, `hybrid_float_boundary_outputs.npz`, and `hybrid_tpu_summary.json`
 - [`import_pb.py`](./import_pb.py): load a frozen graph into TensorBoard logs
 
 Shared helpers live under [`src/`](./src):
@@ -129,6 +133,7 @@ Interpretation:
 ./run_in_env.sh python convert.py --config configs/task_a_dlc.json --model artifacts/task_a/dlc/prefix_saved_model --output artifacts/task_a/dlc/output.tflite
 ./run_in_env.sh python split.py --config configs/task_a_dlc.json --force
 ./run_in_env.sh python updated_edgetpu_test.py --config configs/task_a_dlc.json --frame-limit 2
+./run_in_env.sh python run_hybrid.py --config configs/task_a_dlc.json --cpu-only --frame-limit 2
 ```
 
 What this means:
@@ -138,6 +143,18 @@ What this means:
 - `convert.py` turns the prefix into TFLite
 - `split.py` records the prefix/suffix artifacts for that split
 - `updated_edgetpu_test.py` checks that the split logic still reproduces the full output
+- `run_hybrid.py --cpu-only` checks the new shared runner before TPU hardware is involved
+
+After externally compiling `artifacts/task_a/dlc/output.tflite` with `edgetpu_compiler`, run the hybrid TPU path on a Coral machine:
+
+```bash
+./run_in_env.sh python run_hybrid.py \
+  --config configs/task_a_dlc.json \
+  --compiled-tflite artifacts/task_a/dlc/output_edgetpu.tflite \
+  --frame-limit 2
+```
+
+If `--compiled-tflite` is omitted, the default is `output_edgetpu.tflite` under the task artifact directory.
 
 ## Current TPU Status
 
@@ -150,19 +167,20 @@ What already exists:
 - TFLite conversion
 - suffix export
 - CPU-only split validation
+- PyCoral-backed hybrid runner for compiled Edge TPU prefixes
 
 What is still missing:
 
 1. compile `output.tflite` with `edgetpu_compiler`
-2. load the compiled model with the Coral runtime
-3. run the prefix on the TPU
-4. feed TPU-produced boundary tensors into the suffix graph
-5. save TPU timings and results
+2. install the Coral runtime/PyCoral on the TPU host
+3. run the hybrid command against the compiled model
 
 So:
 
 - `updated_edgetpu_test.py` currently verifies **split correctness**
-- it does **not** yet run a compiled Edge TPU model
+- `run_hybrid.py` runs the compiled Edge TPU prefix when PyCoral and hardware are available
+
+PyCoral is intentionally imported lazily, so CPU-only workflows do not require the Coral runtime. Install PyCoral and the Edge TPU runtime on the Linux/Coral host that will execute `run_hybrid.py` in TPU mode.
 
 ## Data Layout
 
@@ -196,9 +214,9 @@ This branch currently gives you:
 - labeled accuracy baselines for Tasks B and C
 - a manual split/export pipeline
 - CPU-only validation of the split path
+- hybrid TPU-prefix / CPU-suffix execution for compiled Edge TPU prefix models
 
 It does **not** yet give you:
 
 - automatic partition selection
-- real Edge TPU runtime support
 - boundary proxy metrics
