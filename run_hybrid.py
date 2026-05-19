@@ -38,6 +38,16 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Run only the CPU split comparison path without loading PyCoral or a compiled TPU model.",
     )
+    parser.add_argument(
+        "--artifact-tag",
+        default=None,
+        help="Optional suffix for hybrid output filenames (for example, a quantization mode label).",
+    )
+    parser.add_argument(
+        "--quant-mode",
+        default=None,
+        help="Optional metadata label describing the quantization mode used for this run.",
+    )
     return parser.parse_args()
 
 
@@ -45,11 +55,15 @@ def _default_compiled_tflite_path(config: dict) -> str:
     return str(Path(config["artifacts_dir"]) / "output_edgetpu.tflite")
 
 
+def _artifact_path(config: dict, stem: str, suffix: str, artifact_tag: str | None) -> str:
+    filename = f"{stem}{suffix}" if not artifact_tag else f"{stem}_{artifact_tag}{suffix}"
+    return str(Path(config["artifacts_dir"]) / filename)
+
+
 def _save_cpu_comparison(config: dict, runner: HybridRunner, samples: list[dict]) -> tuple[dict, dict, dict]:
     full_outputs, full_timings_ms = runner.run_full_cpu(samples)
     partitioned_outputs, partitioned_timings_ms, float_boundaries = runner.run_partitioned_cpu(samples)
     comparison = compare_named_outputs(full_outputs, partitioned_outputs)
-    save_npz(f"{config['artifacts_dir']}/hybrid_float_boundary_outputs.npz", float_boundaries)
     return (
         full_outputs,
         partitioned_outputs,
@@ -75,24 +89,31 @@ def main() -> None:
     config = load_config(args.config)
     samples = load_samples(config, frame_limit=args.frame_limit)
     runner = HybridRunner(config, boundary_tensors=args.boundary_tensors)
+    artifact_tag = args.artifact_tag
 
     full_outputs, partitioned_outputs, cpu_record = _save_cpu_comparison(config, runner, samples)
     float_boundaries = cpu_record.pop("float_boundary_outputs")
+    float_boundary_output_path = _artifact_path(config, "hybrid_float_boundary_outputs", ".npz", artifact_tag)
+    save_npz(float_boundary_output_path, float_boundaries)
 
     if args.cpu_only:
         summary = {
             "task_name": config["task_name"],
             "mode": "cpu_only",
+            "artifact_tag": artifact_tag,
+            "quant_mode": args.quant_mode,
             "boundary_tensors": runner.boundary_tensors,
             "num_frames": len(samples),
             "sample_ids": [sample["sample_id"] for sample in samples],
             **cpu_record,
             "boundary_shapes": {key: list(value.shape) for key, value in float_boundaries.items()},
+            "float_boundary_output_path": float_boundary_output_path,
         }
-        save_json(f"{config['artifacts_dir']}/hybrid_tpu_summary.json", summary)
+        summary_path = _artifact_path(config, "hybrid_tpu_summary", ".json", artifact_tag)
+        save_json(summary_path, summary)
         print(f"Validated {len(samples)} frames in CPU-only hybrid mode.")
         print(f"CPU split max abs diff: {summary['cpu_split_comparison']['max_abs_diff']}")
-        print(f"Saved summary to: {config['artifacts_dir']}/hybrid_tpu_summary.json")
+        print(f"Saved summary to: {summary_path}")
         return
 
     compiled_tflite_path = args.compiled_tflite or _default_compiled_tflite_path(config)
@@ -103,14 +124,18 @@ def main() -> None:
     output_drift = compare_named_outputs(partitioned_outputs, tpu_outputs)
     boundary_drift = compare_named_outputs(float_boundaries, tpu_boundaries)
 
-    save_npz(f"{config['artifacts_dir']}/hybrid_tpu_outputs.npz", tpu_outputs)
-    save_npz(f"{config['artifacts_dir']}/hybrid_tpu_boundary_dequantized.npz", tpu_boundaries)
-    save_npz(f"{config['artifacts_dir']}/hybrid_float_boundary_outputs.npz", float_boundaries)
+    tpu_output_path = _artifact_path(config, "hybrid_tpu_outputs", ".npz", artifact_tag)
+    tpu_boundary_path = _artifact_path(config, "hybrid_tpu_boundary_dequantized", ".npz", artifact_tag)
+    save_npz(tpu_output_path, tpu_outputs)
+    save_npz(tpu_boundary_path, tpu_boundaries)
 
     summary = {
         "task_name": config["task_name"],
         "mode": "tpu",
+        "artifact_tag": artifact_tag,
+        "quant_mode": args.quant_mode,
         "compiled_tflite_path": compiled_tflite_path,
+        "compiled_tflite_stem": Path(compiled_tflite_path).stem,
         "boundary_tensors": runner.boundary_tensors,
         "num_frames": len(samples),
         "sample_ids": [sample["sample_id"] for sample in samples],
@@ -121,14 +146,20 @@ def main() -> None:
         "tflite_output_metadata": tpu_result["tflite_output_metadata"],
         "output_shapes": {key: list(value.shape) for key, value in tpu_outputs.items()},
         "boundary_shapes": {key: list(value.shape) for key, value in tpu_boundaries.items()},
+        "output_artifacts": {
+            "tpu_outputs": tpu_output_path,
+            "tpu_boundary_dequantized": tpu_boundary_path,
+            "float_boundary_outputs": float_boundary_output_path,
+        },
     }
-    save_json(f"{config['artifacts_dir']}/hybrid_tpu_summary.json", summary)
+    summary_path = _artifact_path(config, "hybrid_tpu_summary", ".json", artifact_tag)
+    save_json(summary_path, summary)
 
     print(f"Ran {len(samples)} samples through hybrid TPU execution.")
     print(f"CPU split max abs diff: {summary['cpu_split_comparison']['max_abs_diff']}")
     print(f"TPU output max abs drift: {output_drift['max_abs_diff']}")
     print(f"Boundary max abs drift: {boundary_drift['max_abs_diff']}")
-    print(f"Saved summary to: {config['artifacts_dir']}/hybrid_tpu_summary.json")
+    print(f"Saved summary to: {summary_path}")
 
 
 if __name__ == "__main__":
