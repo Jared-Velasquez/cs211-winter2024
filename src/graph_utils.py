@@ -50,8 +50,9 @@ def apply_fixed_input_shape(
     for key in (input_tensor_name, input_op_name):
         remapped_graph = tf.Graph()
         with remapped_graph.as_default():
+            original_input = original_graph.get_tensor_by_name(input_tensor_name)
             new_input = tf1.placeholder(
-                dtype=tf.float32,
+                dtype=original_input.dtype,
                 shape=fixed_input_shape,
                 name=input_op_name,
             )
