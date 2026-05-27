@@ -55,6 +55,44 @@ from pathlib import Path
 from typing import Dict, Optional, Tuple
 
 
+MODEL_RUNTIME_DEFAULTS = {
+    "dlc_resnet50": {
+        "task_name": "task_a_dlc",
+        "task_type": "pose_estimation",
+        "data_loader": "ap10k_pose",
+        "images_dir": "data/task_a/data/ap-10k/data",
+        "annotations_path": "data/task_a/data/ap-10k/annotations/ap10k-val-split1.json",
+        "resize": [320, 320],
+        "input_dtype": "float32",
+        "input_normalization": "none",
+        "require_single_instance": True,
+        "annotation_strategy": "largest_instance",
+        "skip_missing_images": False,
+    },
+    "ssd_mobilenet_v2": {
+        "task_name": "task_b_detection",
+        "task_type": "object_detection",
+        "data_loader": "coco_images",
+        "images_dir": "data/task_b/data/val2017",
+        "annotations_path": "data/task_b/data/annotations/instances_val2017.json",
+        "resize": [300, 300],
+        "input_dtype": "float32",
+        "input_normalization": "ssd",
+    },
+    "deeplab_v3_mobilenetv2": {
+        "task_name": "task_c_segmentation",
+        "task_type": "semantic_segmentation",
+        "data_loader": "voc_segmentation",
+        "images_dir": "data/task_c/data/pascal-voc-2012-DatasetNinja/val/img",
+        "annotations_dir": "data/task_c/data/pascal-voc-2012-DatasetNinja/val/ann",
+        "meta_path": "data/task_c/data/pascal-voc-2012-DatasetNinja/meta.json",
+        "resize": [513, 513],
+        "input_dtype": "uint8",
+        "input_normalization": "none",
+    },
+}
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -78,6 +116,10 @@ def _add_colon_zero(name: str) -> str:
 def _parse_csv(s: str) -> list:
     """Split a comma-separated string, stripping whitespace."""
     return [item.strip() for item in s.split(",") if item.strip()]
+
+
+def _parse_int_csv(s: str) -> list:
+    return [int(item.strip()) for item in s.split(",") if item.strip()]
 
 
 def _file_size_kb(path: str) -> int:
@@ -338,6 +380,40 @@ def step_edgetpu_compile(args: argparse.Namespace, tflite_path: str,
 # Step 5: Write metadata.json
 # ---------------------------------------------------------------------------
 
+def _runtime_metadata_from_args(args: argparse.Namespace) -> dict:
+    defaults = dict(MODEL_RUNTIME_DEFAULTS.get(args.model_name, {}))
+    runtime = {
+        "task_name": args.task_name or defaults.get("task_name"),
+        "task_type": args.task_type or defaults.get("task_type"),
+        "data_loader": args.data_loader or defaults.get("data_loader"),
+        "resize": _parse_int_csv(args.resize) if args.resize else defaults.get("resize"),
+        "input_dtype": args.input_dtype or defaults.get("input_dtype"),
+        "input_normalization": args.input_normalization or defaults.get("input_normalization"),
+    }
+    optional_paths = {
+        "video_path": args.video_path or defaults.get("video_path"),
+        "images_dir": args.images_dir or defaults.get("images_dir"),
+        "annotations_path": args.annotations_path or defaults.get("annotations_path"),
+        "annotations_dir": args.annotations_dir or defaults.get("annotations_dir"),
+        "meta_path": args.meta_path or defaults.get("meta_path"),
+    }
+    for key, value in optional_paths.items():
+        if value:
+            runtime[key] = value
+
+    for key in ("require_single_instance", "annotation_strategy", "skip_missing_images"):
+        if key in defaults:
+            runtime[key] = defaults[key]
+
+    missing = [key for key, value in runtime.items() if value is None]
+    if missing:
+        raise ValueError(
+            "Missing runtime metadata fields for metadata.json: "
+            f"{', '.join(missing)}. Provide explicit CLI metadata args "
+            "or use a known --model-name."
+        )
+    return runtime
+
 def write_metadata(args: argparse.Namespace, output_dir: str,
                    boundary_tensors_bare: list,
                    tflite_paths: dict,
@@ -366,6 +442,7 @@ def write_metadata(args: argparse.Namespace, output_dir: str,
     # Fully-qualified tensor names (with :0) used in tpu_output_tensors /
     # cpu_input_tensors — this matches the convention in gen_all_candidates.py.
     tpu_output_tensors = [_add_colon_zero(t) for t in boundary_tensors_bare]
+    runtime = _runtime_metadata_from_args(args)
 
     # Determine the primary TFLite path for tpu_tflite_path.
     # Prefer int8_pure; fall back to int_fallback; then whatever is available.
@@ -398,8 +475,13 @@ def write_metadata(args: argparse.Namespace, output_dir: str,
         ]
 
     meta = {
+        **runtime,
         "model": args.model_name,
         "partition_id": args.partition_id,
+        "model_path": os.path.abspath(args.model),
+        "input_tensor": _add_colon_zero(args.input_tensor),
+        "output_tensors": [_add_colon_zero(t) for t in _parse_csv(args.final_outputs)],
+        "input_shape": _parse_int_csv(args.input_shape),
         "tpu_output_tensors": tpu_output_tensors,
         "cpu_input_tensors": tpu_output_tensors,
         "tpu_tflite_path": primary_tflite,
@@ -407,8 +489,8 @@ def write_metadata(args: argparse.Namespace, output_dir: str,
         "num_tpu_ops": args.num_tpu_ops,
         "num_cpu_ops": args.num_cpu_ops,
         "boundary_tensor_shapes": boundary_shapes,
-        "boundary_bandwidth_bytes": None,
-        "has_skip_crossing": None,
+        "boundary_bandwidth_bytes": args.boundary_bandwidth_bytes,
+        "has_skip_crossing": args.has_skip_crossing,
         "quant_mode": quant_mode_str,
         # edgetpu fields (populated by step 4)
         "edgetpu_compiled": edgetpu_meta["edgetpu_compiled"],
@@ -601,6 +683,36 @@ def build_parser() -> argparse.ArgumentParser:
                              "tensor (comma-separated ints per shape), "
                              "e.g. '1,65,65,32' (single) or '1,65,65,32|1,65,65,96' "
                              "(multiple). Populates boundary_tensor_shapes in metadata.json.")
+    g_meta.add_argument("--boundary-bandwidth-bytes", type=int, default=None,
+                        help="Optional boundary transfer size in bytes for metadata.")
+    g_meta.add_argument("--has-skip-crossing", action="store_true",
+                        help="Mark candidate metadata as having skip/residual edges crossing the partition.")
+    g_meta.add_argument("--task-name", default=None,
+                        help="Runtime task name for strict candidate metadata. "
+                             "Defaults are inferred for known model names.")
+    g_meta.add_argument("--task-type", default=None,
+                        help="Runtime task type for strict candidate metadata.")
+    g_meta.add_argument("--data-loader", default=None,
+                        choices=["video_frames", "coco_images", "ap10k_pose", "voc_segmentation"],
+                        help="Dataset loader expected by the strict hybrid runner.")
+    g_meta.add_argument("--resize", default=None,
+                        help="Runtime resize as width,height. Defaults are inferred for known model names.")
+    g_meta.add_argument("--input-dtype", default=None,
+                        choices=["float32", "uint8"],
+                        help="Runtime input dtype expected by the candidate.")
+    g_meta.add_argument("--input-normalization", default=None,
+                        choices=["none", "ssd"],
+                        help="Runtime input normalization expected by the candidate.")
+    g_meta.add_argument("--video-path", default=None,
+                        help="Dataset video path for video_frames metadata.")
+    g_meta.add_argument("--images-dir", default=None,
+                        help="Dataset image directory for image-based metadata.")
+    g_meta.add_argument("--annotations-path", default=None,
+                        help="Dataset annotations JSON path for COCO/AP-10K metadata.")
+    g_meta.add_argument("--annotations-dir", default=None,
+                        help="Dataset annotations directory for segmentation metadata.")
+    g_meta.add_argument("--meta-path", default=None,
+                        help="Optional dataset metadata path.")
 
     # --- Quantization args ----------------------------------------------------
     g_quant = p.add_argument_group("Quantization (convert.py)")

@@ -381,6 +381,43 @@ MODEL_GROUPS = {
     "deeplab": "deeplab_v3_mobilenetv2",
 }
 
+MODEL_RUNTIME_DEFAULTS = {
+    "dlc_resnet50": {
+        "task_name": "task_a_dlc",
+        "task_type": "pose_estimation",
+        "data_loader": "ap10k_pose",
+        "images_dir": "data/task_a/data/ap-10k/data",
+        "annotations_path": "data/task_a/data/ap-10k/annotations/ap10k-val-split1.json",
+        "resize": [320, 320],
+        "input_dtype": "float32",
+        "input_normalization": "none",
+        "require_single_instance": True,
+        "annotation_strategy": "largest_instance",
+        "skip_missing_images": False,
+    },
+    "ssd_mobilenet_v2": {
+        "task_name": "task_b_detection",
+        "task_type": "object_detection",
+        "data_loader": "coco_images",
+        "images_dir": "data/task_b/data/val2017",
+        "annotations_path": "data/task_b/data/annotations/instances_val2017.json",
+        "resize": [300, 300],
+        "input_dtype": "float32",
+        "input_normalization": "ssd",
+    },
+    "deeplab_v3_mobilenetv2": {
+        "task_name": "task_c_segmentation",
+        "task_type": "semantic_segmentation",
+        "data_loader": "voc_segmentation",
+        "images_dir": "data/task_c/data/pascal-voc-2012-DatasetNinja/val/img",
+        "annotations_dir": "data/task_c/data/pascal-voc-2012-DatasetNinja/val/ann",
+        "meta_path": "data/task_c/data/pascal-voc-2012-DatasetNinja/meta.json",
+        "resize": [513, 513],
+        "input_dtype": "uint8",
+        "input_normalization": "none",
+    },
+}
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -406,10 +443,21 @@ def run(cmd: list, dry_run: bool, desc: str = "") -> bool:
 
 
 def write_metadata(c: dict, adir: Path) -> None:
+    runtime = MODEL_RUNTIME_DEFAULTS[c["model_name"]]
     tpu_out_tensors = [t + ":0" for t in c["output_tensors"]]
     meta = {
+        "task_name": runtime["task_name"],
+        "task_type": runtime["task_type"],
         "model": c["model_name"],
         "partition_id": c["partition_id"],
+        "model_path": str(ROOT / c["model_file"]),
+        "input_tensor": c["input_tensor"] + ":0",
+        "output_tensors": [t + ":0" for t in c["final_outputs"]],
+        "data_loader": runtime["data_loader"],
+        "input_shape": c["input_shape"],
+        "resize": runtime["resize"],
+        "input_dtype": runtime["input_dtype"],
+        "input_normalization": runtime["input_normalization"],
         "tpu_output_tensors": tpu_out_tensors,
         "cpu_input_tensors": tpu_out_tensors,
         "tpu_tflite_path": str(adir / "tpu_int8_pure.tflite"),
@@ -421,11 +469,41 @@ def write_metadata(c: dict, adir: Path) -> None:
         "boundary_bandwidth_bytes": int(c["bandwidth_kib"] * 1024),
         "has_skip_crossing": c["has_skip_crossing"],
         "quant_mode": None,  # filled in after edgetpu_compiler succeeds
+        "edgetpu_compiled": None,
+        "tpu_edgetpu_path": None,
+        "tpu_ops_mapped_edgetpu": None,
+        "edgetpu_rejection_reason": None,
     }
+    for key in (
+        "video_path",
+        "images_dir",
+        "annotations_path",
+        "annotations_dir",
+        "meta_path",
+        "require_single_instance",
+        "annotation_strategy",
+        "skip_missing_images",
+    ):
+        if key in runtime:
+            meta[key] = runtime[key]
+
     path = adir / "metadata.json"
     with open(path, "w") as f:
         json.dump(meta, f, indent=2)
     print(f"  wrote {path}")
+
+
+def print_metadata_preview(c: dict, adir: Path) -> None:
+    runtime = MODEL_RUNTIME_DEFAULTS[c["model_name"]]
+    print(f"  (dry-run) would write {adir}/metadata.json")
+    print(
+        "  metadata preview: "
+        f"task_name={runtime['task_name']} "
+        f"data_loader={runtime['data_loader']} "
+        f"resize={runtime['resize']} "
+        f"input_dtype={runtime['input_dtype']} "
+        f"input_normalization={runtime['input_normalization']}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -514,7 +592,7 @@ def main() -> None:
         if not args.dry_run:
             write_metadata(c, adir)
         else:
-            print(f"  (dry-run) would write {adir}/metadata.json")
+            print_metadata_preview(c, adir)
 
         print()
 
