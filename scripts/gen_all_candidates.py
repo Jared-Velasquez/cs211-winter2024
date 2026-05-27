@@ -412,7 +412,7 @@ def write_metadata(c: dict, adir: Path) -> None:
         "partition_id": c["partition_id"],
         "tpu_output_tensors": tpu_out_tensors,
         "cpu_input_tensors": tpu_out_tensors,
-        "tpu_tflite_path": str(adir / "tpu_int8.tflite"),
+        "tpu_tflite_path": str(adir / "tpu_int8_pure.tflite"),
         "cpu_graph_path": str(adir / "cpu_savedmodel"),
         "num_tpu_ops": c["num_tpu_ops"],
         "num_cpu_ops": c["num_cpu_ops"],
