@@ -179,5 +179,6 @@ pyrightconfig.json
 DLC_ma_superquadruped_resnet_50_iteration-0_shuffle-1.tar.gz
 tpu-starter.tar.gz
 DLC_ma_superquadruped_resnet_50_iteration-0_shuffle-1/*
-docs/
+docs*/
 artifacts/
+compiled_artifacts/

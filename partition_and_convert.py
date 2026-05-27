@@ -1,7 +1,5 @@
 """Unified partition-and-convert pipeline for Coral Edge TPU deployment.
 
-Weeks 7–8 deliverable for Student B (Jared Velasquez, cs211-winter2024).
-
 This script composes the four existing sub-scripts into a single CLI:
 
     gen_tflite.py           -- extract TPU-side SavedModel
