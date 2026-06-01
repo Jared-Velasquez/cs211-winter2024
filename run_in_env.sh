@@ -3,10 +3,15 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_PREFIX="${SCRIPT_DIR}/.conda-baseline"
-PYTHON_BIN="${ENV_PREFIX}/bin/python"
+VENV_PYTHON="${SCRIPT_DIR}/.venv/bin/python"
+CONDA_PYTHON="${ENV_PREFIX}/bin/python"
 
-if [[ ! -x "${PYTHON_BIN}" ]]; then
-  echo "Baseline environment not found at ${ENV_PREFIX}"
+if [[ -x "${VENV_PYTHON}" ]]; then
+  PYTHON_BIN="${VENV_PYTHON}"
+elif [[ -x "${CONDA_PYTHON}" ]]; then
+  PYTHON_BIN="${CONDA_PYTHON}"
+else
+  echo "No repo-local environment was found."
   echo "Run ${SCRIPT_DIR}/setup_env.sh first."
   exit 1
 fi

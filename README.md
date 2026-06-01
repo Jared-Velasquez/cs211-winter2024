@@ -17,6 +17,15 @@ cd cs211-winter2024
 ./setup_env.sh
 ```
 
+`setup_env.sh` now prefers a repo-local `.venv/` when a compatible Python
+(`3.9`-`3.11`) is available, and falls back to `.conda-baseline/` otherwise.
+You can force either mode with:
+
+```bash
+./setup_env.sh --venv
+./setup_env.sh --conda
+```
+
 Run any script with:
 
 ```bash
@@ -25,10 +34,10 @@ Run any script with:
 
 Important files:
 
-- [`environment.yml`](./environment.yml): conda environment spec
+- [`environment.yml`](./environment.yml): conda fallback environment spec
 - [`requirements.txt`](./requirements.txt): minimal Python dependency list
-- [`setup_env.sh`](./setup_env.sh): creates `.conda-baseline/`
-- [`run_in_env.sh`](./run_in_env.sh): runs Python inside the repo-local env
+- [`setup_env.sh`](./setup_env.sh): creates `.venv/` by default, or `.conda-baseline/` as fallback
+- [`run_in_env.sh`](./run_in_env.sh): runs Python inside whichever repo-local env exists
 
 ## Config-Driven Flow
 
@@ -78,7 +87,11 @@ This keeps the generated prefix TFLite model compatible with `edgetpu_compiler`,
 - [`run_hybrid.py`](./run_hybrid.py): run the generalized hybrid path
   - CPU-only mode validates the shared split runner without PyCoral
   - TPU mode loads a compiled Edge TPU prefix, dequantizes boundary tensors, and runs the CPU suffix
-  - writes `hybrid_tpu_outputs.npz`, `hybrid_tpu_boundary_dequantized.npz`, `hybrid_float_boundary_outputs.npz`, and `hybrid_tpu_summary.json`
+  - writes `hybrid_tpu_outputs*.npz`, `hybrid_tpu_boundary_dequantized*.npz`, `hybrid_float_boundary_outputs*.npz`, and `hybrid_tpu_summary*.json`
+- [`run_partition_experiment.py`](./run_partition_experiment.py): orchestrate one manual split across both quantization modes
+  - prepares `int_fallback` and `int8_pure` variants
+  - runs hybrid TPU execution for each compiled variant when available
+  - writes `partition_experiment_summary.json`
 - [`import_pb.py`](./import_pb.py): load a frozen graph into TensorBoard logs
 
 Shared helpers live under [`src/`](./src):
@@ -112,6 +125,46 @@ Important detail:
 - the **suffix** is exported as `suffix_graph.pb`
 
 ## Typical Usage
+
+### Command Cheat Sheet
+
+Setup:
+
+```bash
+cd cs211-winter2024
+./setup_env.sh
+./run_in_env.sh python -c "import tensorflow as tf; print(tf.__version__)"
+```
+
+Baselines:
+
+```bash
+./run_in_env.sh python run_baseline.py --config configs/task_a_dlc.json --frame-limit 100
+./run_in_env.sh python run_baseline.py --config configs/task_b_detection.json --frame-limit 100
+./run_in_env.sh python run_baseline.py --config configs/task_c_segmentation.json --frame-limit 100
+```
+
+Split / TPU-prep:
+
+```bash
+./run_in_env.sh python auto_partition.py --config configs/task_a_dlc.json
+./run_in_env.sh python split.py --config configs/task_a_dlc.json --force
+./run_in_env.sh python convert.py --config configs/task_a_dlc.json --model artifacts/task_a/dlc/prefix_saved_model --output artifacts/task_a/dlc/output.tflite
+```
+
+Split validation:
+
+```bash
+./run_in_env.sh python updated_edgetpu_test.py --config configs/task_a_dlc.json --frame-limit 2
+./run_in_env.sh python run_hybrid.py --config configs/task_a_dlc.json --cpu-only --frame-limit 2
+```
+
+Partition experiment across both quantization modes:
+
+```bash
+./run_in_env.sh python run_partition_experiment.py --config configs/task_a_dlc.json --frame-limit 2 --force-split --rebuild-artifacts --prepare-only
+python3 run_partition_experiment.py --config configs/task_a_dlc.json --frame-limit 2
+```
 
 ### Full float32 baseline
 
@@ -160,6 +213,39 @@ After externally compiling `artifacts/task_a/dlc/output.tflite` with `edgetpu_co
 ```
 
 If `--compiled-tflite` is omitted, the default is `output_edgetpu.tflite` under the task artifact directory.
+
+For tagged hybrid runs, `run_hybrid.py` now writes quantization-specific files such as:
+
+- `hybrid_tpu_outputs_int_fallback.npz`
+- `hybrid_tpu_boundary_dequantized_int_fallback.npz`
+- `hybrid_tpu_summary_int_fallback.json`
+- `hybrid_tpu_outputs_int8_pure.npz`
+- `hybrid_tpu_boundary_dequantized_int8_pure.npz`
+- `hybrid_tpu_summary_int8_pure.json`
+
+To run both quantization modes for the current manual split, use:
+
+```bash
+./run_in_env.sh python run_partition_experiment.py --config configs/task_a_dlc.json --frame-limit 2 --force-split --rebuild-artifacts --prepare-only
+```
+
+on an x86-64 host to create:
+
+- `output_int_fallback.tflite`
+- `output_int8_pure.tflite`
+- and, when `edgetpu_compiler` is installed locally, the matching `_edgetpu.tflite` files
+
+Then on the Coral host, run:
+
+```bash
+python3 run_partition_experiment.py --config configs/task_a_dlc.json --frame-limit 2
+```
+
+This reuses any existing compiled files and produces:
+
+- `hybrid_tpu_summary_int_fallback.json`
+- `hybrid_tpu_summary_int8_pure.json`
+- `partition_experiment_summary.json`
 
 If you change `resize`, `fixed_input_shape`, or `boundary_tensors`, regenerate artifacts in order:
 

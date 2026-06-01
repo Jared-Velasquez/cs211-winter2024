@@ -4,18 +4,17 @@ import base64
 import json
 import zlib
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 import cv2
 import numpy as np
 
 
-def load_video_frames(video_path: str, resize: list[int] | None = None, frame_limit: int | None = None) -> list[dict[str, Any]]:
+def iter_video_frames(video_path: str, resize: list[int] | None = None, frame_limit: int | None = None) -> Iterator[dict[str, Any]]:
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         raise FileNotFoundError(f"Unable to open video: {video_path}")
 
-    samples: list[dict[str, Any]] = []
     frame_index = 0
     while True:
         if frame_limit is not None and frame_index >= frame_limit:
@@ -31,19 +30,16 @@ def load_video_frames(video_path: str, resize: list[int] | None = None, frame_li
             width, height = resize
             frame = cv2.resize(frame, (width, height))
 
-        samples.append(
-            {
-                "input": np.expand_dims(frame.astype(np.float32), axis=0),
-                "sample_id": f"frame_{frame_index:06d}",
-                "sample_index": frame_index,
-                "original_shape": original_shape,
-                "input_shape": list(frame.shape),
-            }
-        )
+        yield {
+            "input": np.expand_dims(frame.astype(np.float32), axis=0),
+            "sample_id": f"frame_{frame_index:06d}",
+            "sample_index": frame_index,
+            "original_shape": original_shape,
+            "input_shape": list(frame.shape),
+        }
         frame_index += 1
 
     cap.release()
-    return samples
 
 
 def _load_image_as_rgb(image_path: Path, resize: list[int] | None = None) -> tuple[np.ndarray, list[int]]:
@@ -59,12 +55,12 @@ def _load_image_as_rgb(image_path: Path, resize: list[int] | None = None) -> tup
     return image.astype(np.float32), original_shape
 
 
-def load_coco_images(
+def iter_coco_images(
     images_dir: str,
     annotations_path: str,
     resize: list[int] | None = None,
     frame_limit: int | None = None,
-) -> list[dict[str, Any]]:
+) -> Iterator[dict[str, Any]]:
     images_root = Path(images_dir)
     annotations = json.loads(Path(annotations_path).read_text(encoding="utf-8"))
 
@@ -72,29 +68,25 @@ def load_coco_images(
     for annotation in annotations.get("annotations", []):
         annotations_by_image_id.setdefault(annotation["image_id"], []).append(annotation)
 
-    samples: list[dict[str, Any]] = []
     for sample_index, image_info in enumerate(annotations.get("images", [])):
         if frame_limit is not None and sample_index >= frame_limit:
             break
 
         image_path = images_root / image_info["file_name"]
         image, original_shape = _load_image_as_rgb(image_path, resize=resize)
-        samples.append(
-            {
-                "input": np.expand_dims(image, axis=0),
-                "sample_id": image_info["file_name"],
-                "sample_index": sample_index,
-                "image_id": image_info["id"],
-                "original_shape": original_shape,
-                "input_shape": list(image.shape),
-                "annotations": annotations_by_image_id.get(image_info["id"], []),
-                "source_path": str(image_path),
-            }
-        )
-    return samples
+        yield {
+            "input": np.expand_dims(image, axis=0),
+            "sample_id": image_info["file_name"],
+            "sample_index": sample_index,
+            "image_id": image_info["id"],
+            "original_shape": original_shape,
+            "input_shape": list(image.shape),
+            "annotations": annotations_by_image_id.get(image_info["id"], []),
+            "source_path": str(image_path),
+        }
 
 
-def load_ap10k_pose_dataset(
+def iter_ap10k_pose_dataset(
     images_dir: str,
     annotations_path: str,
     resize: list[int] | None = None,
@@ -102,7 +94,7 @@ def load_ap10k_pose_dataset(
     require_single_instance: bool = True,
     annotation_strategy: str = "largest_instance",
     skip_missing_images: bool = False,
-) -> list[dict[str, Any]]:
+) -> Iterator[dict[str, Any]]:
     images_root = Path(images_dir)
     annotations = json.loads(Path(annotations_path).read_text(encoding="utf-8"))
 
@@ -112,8 +104,8 @@ def load_ap10k_pose_dataset(
     for annotation in annotations.get("annotations", []):
         annotations_by_image_id.setdefault(annotation["image_id"], []).append(annotation)
 
-    samples: list[dict[str, Any]] = []
     skipped_missing: list[str] = []
+    sample_index = 0
     for image_id, image_info in image_by_id.items():
         image_annotations = annotations_by_image_id.get(image_id, [])
         if not image_annotations:
@@ -137,31 +129,28 @@ def load_ap10k_pose_dataset(
         keypoints = np.asarray(annotation.get("keypoints", []), dtype=np.float32).reshape(-1, 3)
         category = category_by_id[annotation["category_id"]]
 
-        samples.append(
-            {
-                "input": np.expand_dims(image, axis=0),
-                "sample_id": image_info["file_name"],
-                "sample_index": len(samples),
-                "image_id": image_id,
-                "original_shape": original_shape,
-                "input_shape": list(image.shape),
-                "annotation": annotation,
-                "bbox": annotation.get("bbox"),
-                "gt_keypoints": keypoints,
-                "category_name": category["name"],
-                "gt_keypoint_names": category.get("keypoints", []),
-                "source_path": str(image_path),
-            }
-        )
-        if frame_limit is not None and len(samples) >= frame_limit:
+        yield {
+            "input": np.expand_dims(image, axis=0),
+            "sample_id": image_info["file_name"],
+            "sample_index": sample_index,
+            "image_id": image_id,
+            "original_shape": original_shape,
+            "input_shape": list(image.shape),
+            "annotation": annotation,
+            "bbox": annotation.get("bbox"),
+            "gt_keypoints": keypoints,
+            "category_name": category["name"],
+            "gt_keypoint_names": category.get("keypoints", []),
+            "source_path": str(image_path),
+        }
+        sample_index += 1
+        if frame_limit is not None and sample_index >= frame_limit:
             break
 
     if skipped_missing:
         preview = ", ".join(skipped_missing[:5])
         suffix = "" if len(skipped_missing) <= 5 else ", ..."
         print(f"Skipped {len(skipped_missing)} missing AP-10K images: {preview}{suffix}")
-
-    return samples
 
 
 VOC_CLASS_NAME_TO_ID = {
@@ -227,17 +216,16 @@ def _datasetninja_json_to_mask(annotation_path: Path, class_name_to_id: dict[str
     return mask
 
 
-def load_voc_segmentation_dataset(
+def iter_voc_segmentation_dataset(
     images_dir: str,
     annotations_dir: str,
     resize: list[int] | None = None,
     frame_limit: int | None = None,
-) -> list[dict[str, Any]]:
+) -> Iterator[dict[str, Any]]:
     images_root = Path(images_dir)
     annotations_root = Path(annotations_dir)
 
     image_paths = sorted(path for path in images_root.iterdir() if path.is_file())
-    samples: list[dict[str, Any]] = []
     for sample_index, image_path in enumerate(image_paths):
         if frame_limit is not None and sample_index >= frame_limit:
             break
@@ -246,45 +234,42 @@ def load_voc_segmentation_dataset(
         image, original_shape = _load_image_as_rgb(image_path, resize=resize)
         label_mask = _datasetninja_json_to_mask(annotation_path, VOC_CLASS_NAME_TO_ID)
 
-        samples.append(
-            {
-                "input": np.expand_dims(image, axis=0),
-                "sample_id": image_path.name,
-                "sample_index": sample_index,
-                "original_shape": original_shape,
-                "input_shape": list(image.shape),
-                "label_mask": label_mask,
-                "annotation_path": str(annotation_path),
-                "source_path": str(image_path),
-            }
-        )
-    return samples
+        yield {
+            "input": np.expand_dims(image, axis=0),
+            "sample_id": image_path.name,
+            "sample_index": sample_index,
+            "original_shape": original_shape,
+            "input_shape": list(image.shape),
+            "label_mask": label_mask,
+            "annotation_path": str(annotation_path),
+            "source_path": str(image_path),
+        }
 
 
-def load_samples(config: dict[str, Any], frame_limit: int | None = None) -> list[dict[str, Any]]:
+def iter_samples(config: dict[str, Any], frame_limit: int | None = None) -> Iterator[dict[str, Any]]:
     loader = config.get("data_loader", "video_frames")
     if loader == "video_frames":
-        return load_video_frames(
+        return iter_video_frames(
             config["video_path"],
             resize=config.get("resize"),
             frame_limit=frame_limit,
         )
     if loader == "coco_images":
-        return load_coco_images(
+        return iter_coco_images(
             config["images_dir"],
             config["annotations_path"],
             resize=config.get("resize"),
             frame_limit=frame_limit,
         )
     if loader == "voc_segmentation":
-        return load_voc_segmentation_dataset(
+        return iter_voc_segmentation_dataset(
             config["images_dir"],
             config["annotations_dir"],
             resize=config.get("resize"),
             frame_limit=frame_limit,
         )
     if loader == "ap10k_pose":
-        return load_ap10k_pose_dataset(
+        return iter_ap10k_pose_dataset(
             config["images_dir"],
             config["annotations_path"],
             resize=config.get("resize"),
@@ -295,3 +280,7 @@ def load_samples(config: dict[str, Any], frame_limit: int | None = None) -> list
         )
 
     raise ValueError(f"Unsupported data loader '{loader}'.")
+
+
+def load_samples(config: dict[str, Any], frame_limit: int | None = None) -> list[dict[str, Any]]:
+    return list(iter_samples(config, frame_limit=frame_limit))
