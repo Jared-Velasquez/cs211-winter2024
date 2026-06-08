@@ -33,7 +33,16 @@ def _mean(values: list[float]) -> float:
 def _save_cpu_comparison(runner, samples: list[dict], compare_named_outputs) -> tuple[dict, dict, dict]:
     full_outputs, full_timings_ms = runner.run_full_cpu(samples)
     partitioned_outputs, partitioned_timings_ms, float_boundaries = runner.run_partitioned_cpu(samples)
-    comparison = compare_named_outputs(full_outputs, partitioned_outputs)
+    # run_full_cpu keys outputs via _tensor_name_to_key (e.g. "concat_1_0"); the partitioned
+    # suffix keys them via the SavedModel signature (e.g. "output"). Align by position — both
+    # iterate the same output_tensors list in order. (TF1-fallback suffixes key identically,
+    # so this is a no-op there.)
+    if len(full_outputs) != len(partitioned_outputs):
+        raise ValueError(
+            f"Output count mismatch: full_cpu={len(full_outputs)}, partitioned={len(partitioned_outputs)}"
+        )
+    full_aligned = dict(zip(partitioned_outputs.keys(), full_outputs.values()))
+    comparison = compare_named_outputs(full_aligned, partitioned_outputs)
     return (
         full_outputs,
         partitioned_outputs,

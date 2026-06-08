@@ -144,6 +144,7 @@ class HybridRunner:
         ]
 
     def run_full_cpu(self, samples: list[dict[str, Any]]) -> tuple[dict[str, np.ndarray], list[float]]:
+        import numpy as np
         import tensorflow as tf
 
         from src.graph_utils import import_graph, load_graph_def
@@ -156,12 +157,31 @@ class HybridRunner:
         output_tensor_names = list(self.config["output_tensors"])
         output_tensors = [graph.get_tensor_by_name(name) for name in output_tensor_names]
 
+        # Some graphs (e.g. SSD frozen_inference_graph.pb) have additional placeholder
+        # tensors (e.g. image_tensor) that the postprocessor references for image shape,
+        # even when we bypass the preprocessor by feeding an intermediate tensor directly.
+        # Feed dummy zero-filled arrays for those placeholders so TF1 doesn't reject the run.
+        primary_op = self.config["input_tensor"].split(":")[0]
+        input_shape = [int(d) for d in self.config["input_shape"]]
+        extra_feeds: dict = {}
+        for op in graph.get_operations():
+            if op.type != "Placeholder" or op.name == primary_op:
+                continue
+            tensor = op.outputs[0]
+            raw_shape = tensor.shape.as_list()
+            resolved = [
+                (input_shape[i] if i < len(input_shape) else 1) if dim is None else dim
+                for i, dim in enumerate(raw_shape)
+            ]
+            extra_feeds[tensor] = np.zeros(resolved, dtype=tensor.dtype.as_numpy_dtype)
+
         per_frame_outputs = []
         timings_ms = []
         with tf1.Session(graph=graph) as session:
             for sample in samples:
+                feed = {input_tensor: sample["input"], **extra_feeds}
                 start_time = time.perf_counter()
-                values = session.run(output_tensors, feed_dict={input_tensor: sample["input"]})
+                values = session.run(output_tensors, feed_dict=feed)
                 timings_ms.append((time.perf_counter() - start_time) * 1000.0)
                 per_frame_outputs.append(
                     {
@@ -225,7 +245,19 @@ class HybridRunner:
         from src.io_utils import stack_named_outputs
 
         cpu_graph_path = Path(self.config["cpu_graph_path"])
-        loaded = tf.saved_model.load(str(cpu_graph_path))
+
+        # Try TF2 eager SavedModel first. Some models (e.g. SSD) export a cpu_savedmodel
+        # whose signature depends on a placeholder (image_tensor) that was not declared as
+        # an input — TF2's "lifting" step rejects this with UnliftableError. In that case
+        # fall back to a TF1 session on the original frozen graph with the boundary tensor
+        # fed directly as an override.
+        try:
+            loaded = tf.saved_model.load(str(cpu_graph_path))
+        except Exception as exc:
+            if "UnliftableError" in type(exc).__name__ or "Unable to lift tensor" in str(exc):
+                return self._run_suffix_via_full_graph_tf1(boundary_outputs)
+            raise
+
         signature = loaded.signatures.get("serving_default")
         if signature is None:
             raise ValueError(
@@ -263,6 +295,71 @@ class HybridRunner:
                     for key, value in values.items()
                 }
             )
+
+        return stack_named_outputs(per_frame_outputs), timings_ms
+
+    def _run_suffix_via_full_graph_tf1(self, boundary_outputs: dict[str, np.ndarray]) -> tuple[dict[str, np.ndarray], list[float]]:
+        """Fallback suffix runner using TF1 session on the original frozen graph.
+
+        Used when the cpu_savedmodel has dangling placeholders (e.g. SSD's image_tensor)
+        that prevent TF2 eager loading. The boundary tensors are fed as overrides directly
+        into the full graph. Any other placeholders receive zero-filled dummy tensors of
+        the correct shape — for SSD this is image_tensor [1,H,W,3] uint8, whose shape
+        determines H and W for the Postprocessor's box normalization; only shape matters.
+        """
+        import numpy as np
+        import tensorflow as tf
+
+        from src.graph_utils import import_graph, load_graph_def
+        from src.io_utils import stack_named_outputs
+
+        tf1 = tf.compat.v1
+        graph = import_graph(load_graph_def(self.config["model_path"]))
+        output_tensor_names = list(self.config["output_tensors"])
+        output_tensors = [graph.get_tensor_by_name(name) for name in output_tensor_names]
+
+        boundary_op_names = {name.split(":")[0] for name in self.boundary_tensors}
+        input_shape = [int(d) for d in self.config["input_shape"]]
+        extra_feeds: dict = {}
+        for op in graph.get_operations():
+            # Skip non-placeholders and any tensor we are feeding as a boundary override.
+            # Do NOT skip the model's primary input placeholder (e.g. ImageTensor for DeepLab,
+            # image_tensor for SSD) — the suffix run does not feed the primary input, so we
+            # must supply a dummy zero tensor. The decoder/postprocessor uses it only for shape
+            # lookups (output resize H×W, box normalization), not for pixel computation.
+            if op.type != "Placeholder" or op.name in boundary_op_names:
+                continue
+            tensor = op.outputs[0]
+            raw_shape = tensor.shape.as_list()
+            resolved = [
+                (input_shape[i] if i < len(input_shape) else 1) if dim is None else dim
+                for i, dim in enumerate(raw_shape)
+            ]
+            extra_feeds[tensor] = np.zeros(resolved, dtype=tensor.dtype.as_numpy_dtype)
+
+        sample_count = self._infer_sample_count(boundary_outputs)
+        per_frame_outputs = []
+        timings_ms = []
+        with tf1.Session(graph=graph) as session:
+            for sample_index in range(sample_count):
+                feed = dict(extra_feeds)
+                for tensor_name in self.boundary_tensors:
+                    boundary_key = _tensor_name_to_key(tensor_name)
+                    if boundary_key not in boundary_outputs:
+                        raise KeyError(f"Boundary outputs missing expected key: {boundary_key}")
+                    tensor = graph.get_tensor_by_name(tensor_name)
+                    feed[tensor] = self._with_batch_dimension(
+                        boundary_outputs[boundary_key][sample_index]
+                    )
+                start_time = time.perf_counter()
+                values = session.run(output_tensors, feed_dict=feed)
+                timings_ms.append((time.perf_counter() - start_time) * 1000.0)
+                per_frame_outputs.append(
+                    {
+                        _tensor_name_to_key(name): value
+                        for name, value in zip(output_tensor_names, values)
+                    }
+                )
 
         return stack_named_outputs(per_frame_outputs), timings_ms
 
@@ -602,9 +699,13 @@ class HybridRunner:
         target_dtype = np.dtype(input_detail["dtype"])
         tensor_value = value
         if np.issubdtype(target_dtype, np.integer):
-            if not scale:
-                raise ValueError("Quantized TFLite input is missing a non-zero quantization scale.")
-            tensor_value = np.round(value / scale + zero_point)
+            if scale:
+                tensor_value = np.round(value / scale + zero_point)
+            else:
+                # scale=0 means no quantization params embedded — model expects raw integer
+                # pixel data (e.g. DeepLab ImageTensor uint8). Input is float32 in [0,255];
+                # round and clip to the target integer range.
+                tensor_value = np.round(value)
             tensor_value = np.clip(tensor_value, np.iinfo(target_dtype).min, np.iinfo(target_dtype).max)
         interpreter.set_tensor(input_detail["index"], tensor_value.astype(target_dtype))
 
