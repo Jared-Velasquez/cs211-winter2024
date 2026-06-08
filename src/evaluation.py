@@ -119,6 +119,14 @@ def evaluate_pose(samples: list[dict[str, Any]], outputs: dict[str, np.ndarray],
         scale = max(float(bbox[2]), float(bbox[3]), 1.0)
         gt_name_to_index = {name: index for index, name in enumerate(sample["gt_keypoint_names"])}
 
+        # Predictions come out in the resized network-input space (input_shape) and in
+        # (row, col) = (y, x) order; ground truth is in original-image space. Map
+        # predictions back to original-image space so both, and the bbox normalizer
+        # above, share one coordinate frame.
+        orig_h, orig_w = sample["original_shape"][0], sample["original_shape"][1]
+        in_h, in_w = sample["input_shape"][0], sample["input_shape"][1]
+        scale_x, scale_y = orig_w / in_w, orig_h / in_h
+
         for gt_name, pred_name in TASK_A_AP10K_TO_DLC.items():
             gt_index = gt_name_to_index.get(gt_name)
             pred_index = name_to_index.get(pred_name)
@@ -129,7 +137,8 @@ def evaluate_pose(samples: list[dict[str, Any]], outputs: dict[str, np.ndarray],
             if visibility <= 0:
                 continue
 
-            pred_x, pred_y, _ = prediction[pred_index]
+            pred_row, pred_col, _ = prediction[pred_index]
+            pred_x, pred_y = pred_col * scale_x, pred_row * scale_y
             distance = float(np.linalg.norm(np.array([pred_x - x, pred_y - y], dtype=np.float32)))
             distances.append(distance)
             per_keypoint_distances.setdefault(gt_name, []).append(distance)
