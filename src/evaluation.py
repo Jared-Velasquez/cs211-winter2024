@@ -262,6 +262,17 @@ def evaluate_segmentation(samples: list[dict[str, Any]], outputs: dict[str, np.n
     for sample, pred_mask in zip(samples, predictions):
         gt_mask = sample["label_mask"]
         pred_mask = np.asarray(pred_mask, dtype=np.uint8)
+        # Partitioned/hybrid runs emit the segmentation map at the model input size
+        # (e.g. 513x513), while the GT label mask is at the original image resolution.
+        # Resize the prediction (nearest-neighbour, label-preserving) to the GT shape so
+        # per-pixel comparison is valid. The full-graph baseline already emits original
+        # size, so this is a no-op there.
+        if pred_mask.shape != gt_mask.shape:
+            pred_mask = cv2.resize(
+                pred_mask,
+                (gt_mask.shape[1], gt_mask.shape[0]),
+                interpolation=cv2.INTER_NEAREST,
+            )
         valid = gt_mask != ignore_value
 
         gt_flat = gt_mask[valid].astype(np.int64)
