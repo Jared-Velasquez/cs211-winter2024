@@ -331,3 +331,123 @@ It does **not** yet give you:
 
 - automatic partition selection
 - boundary proxy metrics
+
+
+---
+
+## Student D — Evaluation and Analysis Workflow
+
+This is the disk-driven workflow for Student D. It assumes:
+
+- Student A has produced `baseline_results.json` for each task.
+- Student B has produced compiled prefix TFLite + suffix `.pb` per partition candidate.
+- Student C has run each candidate through the `HybridRunner`, saving:
+  - `predictions.npz` (the per-frame model outputs)
+  - `latency.json` (latency breakdown)
+  - boundary tensors (`hybrid_tpu_boundary_dequantized.npz` and `hybrid_float_boundary_outputs.npz`)
+- Student A has produced `proxy_metrics.json` per candidate (boundary MSE, KL, cosine, etc.).
+
+You don't need TPU hardware to develop or run Student D's tools. The only TF-dependent step is `evaluate.py` / `aggregate_results.py`, which load the dataset to score predictions.
+
+## Files Student D owns
+
+- `src/results_records.py` — Results Record schema, headline-metric registry, accuracy-drop math.
+- `src/analysis.py` — Spearman ρ, Pareto frontier, partition-strategy comparison.
+- `evaluate.py` — score one set of saved predictions against ground truth.
+- `aggregate_results.py` — score every candidate listed in a partition manifest.
+- `analyze_partitions.py` — per-task and cross-task correlation analysis.
+- `plot_partitions.py` — Pareto plots, proxy scatter plots, summary CSV.
+- `tests/test_student_d.py` — synthetic tests for the analysis layer.
+
+## End-to-end run
+
+### 1. Score one candidate
+
+```bash
+./run_in_env.sh python evaluate.py \
+  --config configs/task_b_detection.json \
+  --predictions artifacts/task_b/detection/runs/block11/predictions.npz \
+  --partition-id split_after_block11 \
+  --latency-json artifacts/task_b/detection/runs/block11/latency.json \
+  --proxy-json artifacts/task_b/detection/runs/block11/proxy_metrics.json \
+  --output artifacts/task_b/detection/eval/split_after_block11.json
+```
+
+This writes one Results Record JSON. Use it during development to verify a single candidate before the manifest is ready.
+
+### 2. Build a partition manifest
+
+`tests/fixtures/synthetic_detection_results.json` shows the same shape Student C+A jointly produce. The manifest format that `aggregate_results.py` expects is slightly different — it points at *predictions* and *latency/proxy artifacts on disk* rather than precomputed accuracy:
+
+```jsonc
+{
+  "task_config": "configs/task_b_detection.json",
+  "candidates": [
+    {
+      "partition_id": "split_after_block11",
+      "predictions": "runs/block11/predictions.npz",
+      "latency_ms": "runs/block11/latency.json",
+      "proxy_metrics": "runs/block11/proxy_metrics.json",
+      "num_tpu_ops": 142,
+      "num_cpu_ops": 38,
+      "is_max_tpu": false
+    },
+    { "...": "..." }
+  ]
+}
+```
+
+Paths inside the manifest can be absolute or relative to the manifest file.
+
+### 3. Aggregate every candidate
+
+```bash
+./run_in_env.sh python aggregate_results.py \
+  --manifest artifacts/task_b/detection/partition_manifest.json \
+  --output  artifacts/task_b/detection/partition_results.json
+```
+
+This produces a single `partition_results.json` per task with one Results Record per candidate.
+
+### 4. Run the correlation analysis
+
+```bash
+./run_in_env.sh python analyze_partitions.py \
+  --results artifacts/task_a/dlc/partition_results.json \
+            artifacts/task_b/detection/partition_results.json \
+            artifacts/task_c/segmentation/partition_results.json \
+  --output  artifacts/proxy_correlation.json
+```
+
+This computes:
+
+- per-task Spearman ρ for every proxy metric vs. the headline accuracy drop,
+- cross-task consistency (the same proxy across all included tasks),
+- the Pareto frontier per task,
+- a partition-strategy comparison: max-TPU vs. best-actual vs. each proxy's pick.
+
+### 5. Generate plots and the summary table
+
+```bash
+./run_in_env.sh python plot_partitions.py \
+  --results artifacts/task_a/dlc/partition_results.json \
+            artifacts/task_b/detection/partition_results.json \
+            artifacts/task_c/segmentation/partition_results.json \
+  --output-dir artifacts/figures
+```
+
+This produces:
+
+- `pareto_<task_type>.png` — latency vs. headline accuracy with the Pareto frontier.
+- `proxy_<metric>.png` — proxy value vs. headline accuracy drop with all tasks overlaid.
+- `partition_summary.csv` — a flat table for the report.
+
+## Headline metrics per task
+
+| Task | Headline metric | Direction |
+| --- | --- | --- |
+| Pose estimation | `pck_0.10` | higher is better |
+| Object detection | `map_50` | higher is better |
+| Semantic segmentation | `miou` | higher is better |
+
+`accuracy_drop.headline_drop` is always positive when the candidate is *worse* than the float32 baseline.
