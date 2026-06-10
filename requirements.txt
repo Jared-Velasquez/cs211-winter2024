@@ -1,0 +1,8 @@
+numpy<2
+opencv-python<4.13
+pycocotools
+tensorflow>=2.12,<2.16
+matplotlib<3.9
+
+# Optional, Linux/Coral host only:
+# pycoral

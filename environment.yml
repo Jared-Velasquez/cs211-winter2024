@@ -1,0 +1,14 @@
+name: cs211-baseline
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - numpy<2
+  - opencv
+  - pycocotools
+  - pyyaml
+  - pip:
+      - tensorflow>=2.12,<2.16
+      # Optional on Linux/Coral hosts for run_hybrid.py TPU mode:
+      # - pycoral
